@@ -4,32 +4,42 @@ from numpy.typing import NDArray
 from pathlib import Path
 from .debug_tools import cv_show
 
-def order_quad(q):
-    """将任意顺序的四个点排序为 [左上, 右上, 右下, 左下]（图像坐标，y 向下）。
+def order_quad(q, reset = True) -> NDArray[np.floating]:
+  """将任意顺序的四个点排序为 [左上, 右上, 右下, 左下]（图像坐标，y 向下）。
     「绕质心极角排序 → 旋转到左上 → 方向校准」，对任意
     凸四边形都只会得到 4 个互不相同的点。
-    """
-    q = np.asarray(q, dtype=np.float64)
-    if q.shape != (4, 2):
-        raise ValueError(f"expect 4 points, got shape {q.shape}")
 
-    # 1) 绕质心按极角排序 —— 得到一致的环形顺序，绝不重复选点
-    c = q.mean(axis=0)
-    angles = np.arctan2(q[:, 1] - c[1], q[:, 0] - c[0])
-    q = q[np.argsort(angles)]
+  Args:
+      q ([]): 点的列表(4,2)
+      reset (bool, optional): 是否将图像移动到(0, 0)点. Defaults to True.
 
-    # 2) 旋转使最“左上”的点（x+y 最小）位于首位
-    start = int(np.argmin(q.sum(axis=1)))
-    q = np.roll(q, -start, axis=0)
+  Raises:
+      ValueError: _description_
 
-    # 3) 图像坐标下 [TL, TR, BR, BL] 是顺时针：TL→TR 应使 x 增大。
-    #    若方向反了（解出的是 TL→BL→BR→TR），翻转余下三点。
-    if q[1, 0] < q[0, 0]:
-        q = np.concatenate([q[:1], q[:0:-1]])
+  Returns:
+      NDArray[np.floating]: 处理后的点列表(4,2)
+  """
+  q = np.asarray(q, dtype=np.float64)
+  if q.shape != (4, 2):
+      raise ValueError(f"expect 4 points, got shape {q.shape}")
 
-    return q
+  # 1) 绕质心按极角排序 —— 得到一致的环形顺序，绝不重复选点
+  c = q.mean(axis=0)
+  angles = np.arctan2(q[:, 1] - c[1], q[:, 0] - c[0])
+  q = q[np.argsort(angles)]
 
+  # 2) 旋转使最“左上”的点（x+y 最小）位于首位
+  start = int(np.argmin(q.sum(axis=1)))
+  q = np.roll(q, -start, axis=0)
 
+  # 3) 图像坐标下 [TL, TR, BR, BL] 是顺时针：TL→TR 应使 x 增大。
+  #    若方向反了（解出的是 TL→BL→BR→TR），翻转余下三点。
+  if q[1, 0] < q[0, 0]:
+      q = np.concatenate([q[:1], q[:0:-1]])
+
+  if reset:
+      q -= q.min(axis=0)
+  return q
 
 
 def _as_3x3(M: NDArray[np.floating]) -> NDArray[np.float64]:
@@ -72,7 +82,26 @@ class QuadMatrix(np.ndarray):
   def __array_finalize__(self, obj):
     self.dst_quad = getattr(obj, "dst_quad", None)
     self.src_size = getattr(obj, "src_size", None)
+    
 
+class OffsetImg(np.ndarray):
+  """携带偏移量信息的图片。
+
+  普通 ndarray 无法附带元数据，因此用子类记录：
+  - ``dst_quad``：目标四边形。``proj_tran`` 据此把输出画布裁剪为其外接矩形，
+    输出尺寸因此与四边形尺寸一致（不再铺满整幅变换后图像的包围盒）；
+  - ``src_size``：生成矩阵时用的源矩形尺寸；为 ``None`` 表示「源尺寸待定」，
+    ``proj_tran`` 会用输入图像的宽高补全，从而把整幅图像拉伸铺满 ``dst_quad``。
+  """
+  offset: NDArray[np.uint8] | None = None
+
+  def __new__(cls, img, offset=None):
+    obj = np.asarray(img, dtype=np.uint8).view(cls)
+    obj.offset = None if offset is None else np.asarray(offset, dtype=np.uint32)
+    return obj
+
+  def __array_finalize__(self, obj):
+    self.offset = getattr(obj, "offset", None)
 
 
 def _get_quad_wh(w: int, h: int, M: NDArray[np.floating]) -> tuple[int, int]:
@@ -102,8 +131,6 @@ def _get_quad_wh(w: int, h: int, M: NDArray[np.floating]) -> tuple[int, int]:
   new_w = int(np.ceil(x_max - x_min))
   new_h = int(np.ceil(y_max - y_min))
   return new_w, new_h
-
-
 
 
 def get_rand_M(w: int, h: int, scale_range=(0.8, 1.2), shear_range=(-0.2, 0.2), rotation_range=(-15, 15), translation_range=(-0.2, 0.2), perspective_range=(-0.001, 0.001)) -> NDArray[np.float64]:
@@ -159,7 +186,6 @@ def get_rand_M(w: int, h: int, scale_range=(0.8, 1.2), shear_range=(-0.2, 0.2), 
   # 综合变换矩阵
   M = T @ R @ Sh @ S @ P
   return M
-
 
 
 def proj_tran(img: NDArray[np.uint8], M: NDArray[np.floating], overflow = False, dst_quad = None) -> NDArray[np.uint8]:
@@ -220,7 +246,8 @@ def proj_tran(img: NDArray[np.uint8], M: NDArray[np.floating], overflow = False,
   # 只做平移（左乘）把结果挪到画布坐标, 保留 quad 的真实形状, 不把四边形硬压成矩形。
   # 注意透视除法会等比例缩放平移量, 因此不能像仿射那样直接改 M[0, 2] / M[1, 2]。
   T = np.array([[1.0, 0.0, -x_min], [0.0, 1.0, -y_min], [0.0, 0.0, 1.0]], dtype=np.float64)
-  return cv2.warpPerspective(img, T @ M3, (new_w, new_h), flags=cv2.INTER_LINEAR)
+  return OffsetImg(cv2.warpPerspective(img, T @ M3, (new_w, new_h), flags=cv2.INTER_LINEAR),
+                 offset=(x_min, y_min))
 
 
 def quad2M(quad, w: int = 0, h: int = 0) -> NDArray[np.float64]:
@@ -260,17 +287,18 @@ if __name__ == "__main__":
   img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
   assert img is not None, f"无法读取图片: {img_path}"
   quad1 = np.array([[1167.3775, 8.48  ],
-        [1179.9175, 8.48  ],
-        [1180.1375,15.52  ],
-        [1167.8175,15.52  ]], dtype=np.float64)
-  quad = np.array([[20, 20  ],
-          [100, 0  ],
-          [200,100  ],
-          [0,250  ]], dtype=np.float64)
+        [1179.9175, 8.48],
+        [1180.1375,15.52],
+        [1167.8175,15.52]], dtype=np.float64)
+  quad = np.array([[50, 60],
+          [100, 0],
+          [200,100],
+          [0,250]], dtype=np.float64)
   print(f"M: {quad2M(quad)}")
   # for i in range(5):
   # quad2M(quad) 未给源尺寸 => proj_tran 用 img 尺寸补全: img 四角对准 quad1 四角,
   # 整幅图被拉伸铺满 quad1, 输出画布 = quad1 的外接矩形
   out = proj_tran(img, quad2M(order_quad(quad)))
+  out = cv2.drawContours(out, [quad.astype(np.int32)], -1, (0, 255, 0), 2)
   print(f"out.shape = {out.shape}")  # == quad1 外接矩形尺寸
   cv_show(out, "射影变换")

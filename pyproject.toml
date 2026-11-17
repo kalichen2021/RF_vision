@@ -10,5 +10,27 @@ requires-python = ">=3.10"
 [project.scripts]
 digits_tracker = "cli.main:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov>=5"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# 测试目录与业务代码镜像，且 tests/ 为包（含 __init__.py）
+testpaths = ["tests"]
+# 业务代码同时存在 src 布局（utils/cli/...）与根级包（configs），两者都需可导入
+pythonpath = ["src", "."]
+# 默认安静模式：进度由 tests/conftest.py 的原地刷新进度条接管
+addopts = "-q --tb=short --color=yes"
+# 关闭 pytest 自带的百分比信息，避免与自定义进度条抢同一行
+console_output_style = "classic"
+
+[tool.coverage.run]
+# 同时统计 src 布局的包与根级 configs 包
+source = ["src", "configs"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

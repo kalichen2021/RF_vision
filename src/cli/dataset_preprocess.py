@@ -9,3 +9,4 @@ from src.preprocess import Preprocess
 PP = Preprocess()
 for i in range(ppcfg.SELECT_NUM):
   raw_img = 1
+  

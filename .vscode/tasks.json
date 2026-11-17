@@ -1,0 +1,60 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "pytest: 全部测试",
+      "detail": "运行 tests/ 下的全部测试（默认测试任务，Ctrl+Shift+P → Tasks: Run Test Task）",
+      "type": "shell",
+      "command": "conda activate NNVN; python -m pytest",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "options": {
+        "env": {
+          "PYTEST_LIVE_BAR": "1"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "pytest: 当前文件",
+      "detail": "运行当前打开的测试文件",
+      "type": "shell",
+      "command": "conda activate NNVN; python -m pytest",
+      "args": ["${relativeFile}"],
+      "options": {
+        "env": {
+          "PYTEST_LIVE_BAR": "1"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "pytest: 上次失败用例",
+      "detail": "只重跑上次失败的用例（--lf）",
+      "type": "shell",
+      "command": "conda activate NNVN; python -m pytest",
+      "args": ["--lf"],
+      "options": {
+        "env": {
+          "PYTEST_LIVE_BAR": "1"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "pytest: 覆盖率",
+      "detail": "全部测试 + 终端覆盖率表 + HTML 报告（htmlcov/index.html）",
+      "type": "shell",
+      "command": "conda activate NNVN; python -m pytest --cov --cov-report=term-missing --cov-report=html",
+      "group": "test",
+      "options": {
+        "env": {
+          "PYTEST_LIVE_BAR": "1"
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+}

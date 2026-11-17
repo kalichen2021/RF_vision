@@ -1,14 +1,18 @@
-import cv2,sys,numpy as np, random, math
+from configs.path import RAW_DIR, LOG_DIR
+import cv2
+import sys
+import numpy as np
+import random
+import math
 from numpy.typing import NDArray
 from .debug_tools import cv_show, read_image
-from .geometry import order_quad
+from .geometry import order_quad, OffsetImg
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from configs.path import RAW_DIR, LOG_DIR
 
 
-def _smooth_mask(gray, win=15, var_thresh=8.0, iter = 1):
+def _smooth_mask(gray, win=15, var_thresh=8.0, iter=1):
   """基于局部方差的平滑区域掩膜
 
   在 win×win 窗口内计算灰度方差，方差小于 var_thresh 的像素视为平滑区域，
@@ -57,34 +61,47 @@ def _is_acceptable(sub_quad, distortion_limit):
   """判断切出来的小四边形是否可接受（畸变是否在容忍范围内）"""
   # 计算四条边
   edges = [
-    np.linalg.norm(sub_quad[0] - sub_quad[1]),
-    np.linalg.norm(sub_quad[1] - sub_quad[2]),
-    np.linalg.norm(sub_quad[2] - sub_quad[3]),
-    np.linalg.norm(sub_quad[3] - sub_quad[0])
+      np.linalg.norm(sub_quad[0] - sub_quad[1]),
+      np.linalg.norm(sub_quad[1] - sub_quad[2]),
+      np.linalg.norm(sub_quad[2] - sub_quad[3]),
+      np.linalg.norm(sub_quad[3] - sub_quad[0])
   ]
-  
+
   min_edge = min(edges)
   # 如果最短边太小，说明退化成了三角形或极小碎块，直接舍弃
   if min_edge < 1e-4:
     return False
-    
+
   max_edge = max(edges)
   aspect_ratio = max_edge / min_edge
-  
+
   # 将 distortion_limit (0~1) 映射为可接受的最大长宽比阈值
   # distortion_limit=0 时，只接受接近正方形的 (比例 <= 1.5)
   # distortion_limit=1 时，接受较扁的 (比例 <= 5.0)
   allowed_ratio = 1.5 + distortion_limit * 3.5
-  
+
   if aspect_ratio > allowed_ratio:
     return False
-    
+
   return True
+
+
+def _get_mask(offset_img):
+  if getattr(offset_img, "offset", None) is None:
+    raise ValueError("offset_img 缺少 offset元数据")
+  dx, dy = offset_img.offset
+  oh, ow = offset_img.shape
+  (w, h) = (dx + ow, dy + oh)
+  out = np.zeros((max(dy + oh, 0), max(dx + ow, 0)), np.uint8)
+  font_mask = cv2.threshold(offset_img, 1, 255, cv2.THRESH_BINARY)[1]
+  out[dy:, dx:] = font_mask
+
+  return out
 
 
 def segment_quad(quad, distortion, normalize, count, gap=0.12, area_range=(.3, 3000)):
   """将四边形分割成多个四边形，通过畸变过滤舍弃无法挽救的碎片。
-  
+
   Args:
     quad (NDArray[np.float64]): 输入的四边形，(4, 2) 的顶点坐标 [左上, 右上, 右下, 左下]
     distortion (float | tuple): 畸变容忍度（0~1），越小要求越严格（丢弃越多的畸变块）。
@@ -98,51 +115,55 @@ def segment_quad(quad, distortion, normalize, count, gap=0.12, area_range=(.3, 3
     distortion = random.uniform(distortion[0], distortion[1])
   if isinstance(normalize, tuple):
     normalize = random.uniform(normalize[0], normalize[1])
-    
+
   # 2. 计算物理空间的平均宽高 (用于自适应分配行列数，防止长条)
   width_top = np.linalg.norm(quad[1] - quad[0])
   width_bottom = np.linalg.norm(quad[2] - quad[3])
   height_left = np.linalg.norm(quad[3] - quad[0])
   height_right = np.linalg.norm(quad[2] - quad[1])
-  
+
   avg_w = (width_top + width_bottom) / 2.0
   avg_h = (height_left + height_right) / 2.0
-  
+
   target_num = random.randint(count[0], count[1])
-  
+
   # 根据物理长宽比分配行列数
   aspect_ratio = max(avg_w, 1e-6) / max(avg_h, 1e-6)
   cols = max(1, int(round(math.sqrt(target_num * aspect_ratio))))
   rows = max(1, int(round(target_num / cols)))
-  
+
   # 确保网格数量在目标范围内
   while cols * rows > count[1]:
-    if cols > rows: cols -= 1
-    else: rows -= 1
+    if cols > rows:
+      cols -= 1
+    else:
+      rows -= 1
   while cols * rows < count[0]:
-    if avg_w > avg_h: cols += 1
-    else: rows += 1
+    if avg_w > avg_h:
+      cols += 1
+    else:
+      rows += 1
 
   # 3. 生成内部网格点
   u_vals = np.linspace(0, 1, cols + 1)
   v_vals = np.linspace(0, 1, rows + 1)
-  
+
   grid_points = np.zeros((rows + 1, cols + 1, 2), dtype=np.float64)
-  
+
   for j in range(rows + 1):
     for i in range(cols + 1):
       u = u_vals[i]
       v = v_vals[j]
-      
+
       p_top = (1 - u) * quad[0] + u * quad[1]
       p_bot = (1 - u) * quad[3] + u * quad[2]
       p_base = (1 - v) * p_top + v * p_bot
-      
+
       # 内部网格正则化处理 (normalize 控制菱形分布)
       if 0 < i < cols and 0 < j < rows:
         u_center = u - 0.5
         v_center = v - 0.5
-        
+
         if normalize > 0.5:
           w_diamond = (normalize - 0.5) * 2.0
           p_base[0] += u_center * v_center * w_diamond * avg_w * 0.5
@@ -160,7 +181,7 @@ def segment_quad(quad, distortion, normalize, count, gap=0.12, area_range=(.3, 3
       p_bl = grid_points[j + 1, i]
 
       center = (p_tl + p_tr + p_br + p_bl) / 4.0
-      
+
       g = max(0.0, min(0.9, gap))
       p_tl = p_tl + (center - p_tl) * g
       p_tr = p_tr + (center - p_tr) * g
@@ -169,7 +190,7 @@ def segment_quad(quad, distortion, normalize, count, gap=0.12, area_range=(.3, 3
 
       sub_quad = np.array([p_tl, p_tr, p_br, p_bl], dtype=np.float64)
 
-      _area_range = []      
+      _area_range = []
       for i in range(len(area_range)):
         if area_range[i] < 1:
           _area_range.append(area_range[i] * (avg_w * avg_h))
@@ -181,11 +202,11 @@ def segment_quad(quad, distortion, normalize, count, gap=0.12, area_range=(.3, 3
       if _is_acceptable(sub_quad, distortion):
         # 如果该碎片的面积在指定范围内，则加入结果
         if _area_range[0] <= cv2.contourArea(np.array(sub_quad, dtype=np.int32)) <= _area_range[1]:
-          segments.append(sub_quad)
-      
+          segments.append(OffsetImg(sub_quad, offset=(p_tl[0], p_tl[1])))
+
   return segments
-  
-  
+
+
 def get_flat_quad(img: NDArray[np.uint8]):
   """获得图片平滑区域，返回四边形
 
@@ -197,31 +218,50 @@ def get_flat_quad(img: NDArray[np.uint8]):
   gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
   mask = cv2.blur(gray, (5, 5))
   mask = _smooth_mask(gray)
-  cv2.imencode('.png', mask)[1].tofile(f"{LOG_DIR}/{img.shape}_debug_0_mask.png")
-  
-  contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+  cv2.imencode('.png', mask)[1].tofile(
+      f"{LOG_DIR}/{img.shape}_debug_0_mask.png")
+
+  contours, _ = cv2.findContours(
+      mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
   if not contours:
     print("未检测到平滑区域")
     return None
-  
-  _img = cv2.drawContours(img.copy(), contours, -1, (0, 255, 0), 2)
-  cv2.imencode('.png', _img)[1].tofile(f"{LOG_DIR}/{img.shape}_debug_1_contours.png")
 
-  
-  quads = [_get_maxquad(cnt) for cnt in contours]  
+  _img = cv2.drawContours(img.copy(), contours, -1, (0, 255, 0), 2)
+  cv2.imencode('.png', _img)[1].tofile(
+      f"{LOG_DIR}/{img.shape}_debug_1_contours.png")
+
+  quads = [_get_maxquad(cnt) for cnt in contours]
   quads = [np.array(q, dtype=np.int32) for q in quads if q is not None]
-  _img = cv2.drawContours(img.copy(), np.array(quads, dtype=np.int32), -1, (0, 255, 0), 2)
-  cv2.imencode('.png', _img)[1].tofile(f"{LOG_DIR}/{img.shape}_debug_1_quads.png")
+  _img = cv2.drawContours(img.copy(), np.array(
+      quads, dtype=np.int32), -1, (0, 255, 0), 2)
+  cv2.imencode('.png', _img)[1].tofile(
+      f"{LOG_DIR}/{img.shape}_debug_1_quads.png")
   # quads = [q for q in quads if cv2.contourArea(q) >= max(_area_range[0], _area_range[1])]
-  
+
   quads = [order_quad(q) for q in quads]
-  _img = cv2.drawContours(img.copy(), np.array(quads, dtype=np.int32), -1, (0, 255, 0), 2)
-  cv2.imencode('.png', _img)[1].tofile(f"{LOG_DIR}/{img.shape}_debug_2_contours.png")
+  _img = cv2.drawContours(img.copy(), np.array(
+      quads, dtype=np.int32), -1, (0, 255, 0), 2)
+  cv2.imencode('.png', _img)[1].tofile(
+      f"{LOG_DIR}/{img.shape}_debug_2_contours.png")
 
   return quads
 
 
+def fuse_img(img_items, img_env, config):
+  """将img_items图像融合进img_env, 通常img_item是前景色为白色，背景色为黑色的简单图片
 
+  Args:
+      img_items ([NDArray[np.uint8]]): 简单的前景图像列表，通常是白色前景黑色背景的图片
+      img_env (NDArray[np.uint8]): 环境图像，通常是彩色图像
+      config (dict): 融合配置，包含以下键：
+          - "blend_mode": 融合模式，支持 "add", "multiply", "overlay" 等
+          - "alpha": 融合权重，范围 [0, 1]
+          - "position": 融合位置，(x, y) 坐标
+  """
+  for img_item in img_items:
+    # 这里可以添加具体的融合逻辑
+    pass
 
 
 if __name__ == "__main__":
@@ -231,13 +271,14 @@ if __name__ == "__main__":
   assert img is not None, f"无法读取图片: {img_path}"
 
   quads = get_flat_quad(img)
-  
+
   if quads is None:
     print("未检测到符合条件的四边形区域")
   else:
     vis = img.copy()
     for i, quad in enumerate(quads):
-      quad = segment_quad(quad, distortion=(0.1, 0.3), normalize= (0.5, 0.8),count=(1, 5), area_range=(1000, 30000))
+      quad = segment_quad(quad, distortion=(0.1, 0.3), normalize=(
+          0.5, 0.8), count=(1, 5), area_range=(1000, 30000))
       print(f"Quad {i+1}: {quad} segments")
       cv2.polylines(vis, np.array(quad, dtype=np.int32), True, (0, 255, 0), 2)
     cv_show(vis, f"Quad {i+1}")
