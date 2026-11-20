@@ -6,7 +6,7 @@ import random
 import math
 from numpy.typing import NDArray
 from .debug_tools import cv_show, read_image
-from .geometry import order_quad, OffsetImg
+from .geometry import order_quad, QuadSegment
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -56,7 +56,12 @@ def _get_maxquad(cnt):
       return approx.reshape(4, 2).astype(np.float64)
   return None
 
-
+def _get_threhold_edge(img):
+  kernel = np.ones((3,3), np.uint8)
+  dilated = cv2.dilate(img, kernel, iterations=5)
+  res = cv2.subtract(dilated, img)
+  return res
+  
 def _is_acceptable(sub_quad, distortion_limit):
   """判断切出来的小四边形是否可接受（畸变是否在容忍范围内）"""
   # 计算四条边
@@ -86,29 +91,59 @@ def _is_acceptable(sub_quad, distortion_limit):
   return True
 
 
-def _get_mask(offset_img):
-  if getattr(offset_img, "offset", None) is None:
-    raise ValueError("offset_img 缺少 offset元数据")
-  dx, dy = offset_img.offset
-  oh, ow = offset_img.shape
-  (w, h) = (dx + ow, dy + oh)
+def _get_mask(offset_img, offset=None):
+  """把贴图二值化后铺到整幅环境图尺寸的掩膜上
+
+  Args:
+      offset_img (NDArray[np.uint8]): 前景白、背景黑的贴图；
+        若是 ``proj_tran`` 的返回值，则自带 ``offset`` 元数据
+      offset (tuple[float, float] | None): 贴图在环境图中的左上角坐标 ``(x, y)``；
+        缺省时取 ``offset_img.offset``
+
+  Raises:
+      ValueError: 既没有传入 offset，贴图也没有 ``offset`` 元数据
+
+  Returns:
+      NDArray[np.uint8]: 与「贴图落点 + 贴图尺寸」等大的单通道掩膜
+  """
+  if offset is None:
+    offset = getattr(offset_img, "offset", None)
+  if offset is None:
+    raise ValueError("缺少 offset：请显式传入 offset，或使用 proj_tran 的返回值")
+  dx, dy = int(round(float(offset[0]))), int(round(float(offset[1])))
+  oh, ow = offset_img.shape[:2]
   out = np.zeros((max(dy + oh, 0), max(dx + ow, 0)), np.uint8)
   font_mask = cv2.threshold(offset_img, 1, 255, cv2.THRESH_BINARY)[1]
-  out[dy:, dx:] = font_mask
+  # 贴图可能有一部分落在画布外（dx / dy 为负），只写回可见区域
+  x0, y0 = max(dx, 0), max(dy, 0)
+  src = font_mask[max(0, -dy):, max(0, -dx):]
+  out[y0:y0 + src.shape[0], x0:x0 + src.shape[1]] = src
 
   return out
 
 
-def segment_quad(quad, distortion, normalize, count, gap=0.12, area_range=(.3, 3000)):
-  """将四边形分割成多个四边形，通过畸变过滤舍弃无法挽救的碎片。
+def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
+                 board_aspect=None, cell_jitter=0.18):
+  """按「目标板位面积」将四边形分割成多个四边形，通过面积 / 畸变过滤舍弃碎片。
+
+  切分数量不单独指定：先按 ``area_range`` 采样一块板位的目标面积，
+  再用平坦区域总面积除以它得到格子数，所以板子要多大就切多少块。
+
+  板子看着像正方形，实际是长宽未知的矩形：每次调用会在畸变容忍度允许的
+  比例范围内随机取一个长宽比，再据此解出行列数，不把格子切成等宽等高。
 
   Args:
     quad (NDArray[np.float64]): 输入的四边形，(4, 2) 的顶点坐标 [左上, 右上, 右下, 左下]
-    distortion (float | tuple): 畸变容忍度（0~1），越小要求越严格（丢弃越多的畸变块）。
+    distortion (float | tuple): 畸变容忍度（0~1），越小要求越严格（丢弃越多的畸变块）；
+        同时决定板位长宽比的允许范围（1.5 + 3.5*d）。
     normalize (float | tuple): 归一化程度（0~1），值越大内部网格越接近菱形分布。
-    count (tuple): 分割后的四边形数量范围（这是网格划分的目标数，实际返回可能会因为舍弃而变少）。
-    area_range (tuple): 每个分割出的四边形的面积范围。
+    area_range (tuple): 单个板位的面积范围（像素²），<1 的值按占平坦区域面积的比例解释；
+        同时决定切分数量（总面积 / 目标板位面积）。
     gap (float): 切割间隙 (0~1，0为无缝)。
+    board_aspect (float | tuple | None): 板位长宽比（宽/高）；tuple 时在区间内随机取，
+        None 时取畸变容忍度允许的整个范围。Defaults to None.
+    cell_jitter (float): 切割线位置的抖动幅度（0~1）；>0 时同一区域里每块板的长宽都不同。
+        Defaults to 0.18.
   """
   # 1. 处理范围参数
   if isinstance(distortion, tuple):
@@ -124,29 +159,65 @@ def segment_quad(quad, distortion, normalize, count, gap=0.12, area_range=(.3, 3
 
   avg_w = (width_top + width_bottom) / 2.0
   avg_h = (height_left + height_right) / 2.0
+  quad_area = abs(cv2.contourArea(np.asarray(quad, dtype=np.float32)))
 
-  target_num = random.randint(count[0], count[1])
+  # 面积阈值只算一次：< 1 的值按「占平坦区域面积的比例」解释，>= 1 按像素面积
+  area_lo, area_hi = sorted(float(v) * quad_area if float(v) < 1 else float(v)
+                            for v in area_range)
 
-  # 根据物理长宽比分配行列数
+  # 切分数量由板位面积决定：先采样目标板位面积（gap 收缩后的实际面积）
+  gap = max(0.0, min(0.9, gap))
+  shrink = (1.0 - gap) ** 2        # gap 向内收缩后格子剩下的相对面积
+  target_area = random.uniform(area_lo, area_hi)
+  target_num = max(1, int(round(quad_area * shrink / max(target_area, 1.0))))
+
+  # 板子看着接近正方形，实际长宽未知：在畸变容忍允许的范围内随机取一个长宽比
+  max_ratio = 1.5 + distortion * 3.5        # 与 _is_acceptable 的上限保持一致
+  if board_aspect is None:
+    board_ratio = random.uniform(1.0 / max_ratio, max_ratio)
+  elif isinstance(board_aspect, (tuple, list)):
+    board_ratio = random.uniform(float(board_aspect[0]), float(board_aspect[1]))
+  else:
+    board_ratio = float(board_aspect)
+
+  # 行列数要同时满足「格子宽高比接近 board_ratio」与「格子面积落在 area_range 内」：
+  # 先按 sqrt 求理想列数，再枚举该列数附近可行的行数，最后按两个误差择优。
+  # （直接四舍五入会把板子切成细长条，细长条又会被畸变过滤丢掉）
   aspect_ratio = max(avg_w, 1e-6) / max(avg_h, 1e-6)
-  cols = max(1, int(round(math.sqrt(target_num * aspect_ratio))))
-  rows = max(1, int(round(target_num / cols)))
+  ideal_cols = max(1.0, math.sqrt(target_num * aspect_ratio / board_ratio))
 
-  # 确保网格数量在目标范围内
-  while cols * rows > count[1]:
-    if cols > rows:
-      cols -= 1
-    else:
-      rows -= 1
-  while cols * rows < count[0]:
-    if avg_w > avg_h:
-      cols += 1
-    else:
-      rows += 1
+  candidates = []          # (cols, rows, 收缩后格子面积, 格子宽高比)
+  for c in range(1, max(2, int(round(ideal_cols)) + 4)):
+    r_lo = max(1, int(math.ceil(quad_area * shrink / (c * area_hi))))
+    for r in range(r_lo, r_lo + 33):
+      cell_area = quad_area / (c * r) * shrink
+      if cell_area < area_lo:          # 行数继续增加只会更小，直接收工
+        break
+      cell_ratio = aspect_ratio * r / c
+      if 1.0 / max_ratio <= cell_ratio <= max_ratio:
+        candidates.append((c, r, cell_area, cell_ratio))
 
-  # 3. 生成内部网格点
-  u_vals = np.linspace(0, 1, cols + 1)
-  v_vals = np.linspace(0, 1, rows + 1)
+  if not candidates:        # 这块区域放不下既合面积、又合长宽比的板子
+    return []
+
+  cols, rows, _, _ = min(
+      candidates,
+      key=lambda cand: abs(math.log(cand[2] / target_area))
+      + abs(math.log(cand[3] / board_ratio)))
+
+  # 3. 生成内部网格点（切割线带抖动：同一区域里每块板的长宽都不完全相同）
+  jitter = max(0.0, min(0.45, float(cell_jitter)))
+
+  def _cuts(n):
+    """0~1 上 n 段切割线；每段权重 1±jitter，保证板子不全是同一个尺寸"""
+    if n <= 1 or jitter <= 0.0:
+      return np.linspace(0.0, 1.0, n + 1)
+    w = np.clip(np.array([1.0 + random.uniform(-jitter, jitter)
+                          for _ in range(n)]), 1.0 - jitter, None)
+    return np.concatenate([[0.0], np.cumsum(w) / w.sum()])
+
+  u_vals = _cuts(cols)
+  v_vals = _cuts(rows)
 
   grid_points = np.zeros((rows + 1, cols + 1, 2), dtype=np.float64)
 
@@ -182,41 +253,135 @@ def segment_quad(quad, distortion, normalize, count, gap=0.12, area_range=(.3, 3
 
       center = (p_tl + p_tr + p_br + p_bl) / 4.0
 
-      g = max(0.0, min(0.9, gap))
-      p_tl = p_tl + (center - p_tl) * g
-      p_tr = p_tr + (center - p_tr) * g
-      p_br = p_br + (center - p_br) * g
-      p_bl = p_bl + (center - p_bl) * g
+      p_tl = p_tl + (center - p_tl) * gap
+      p_tr = p_tr + (center - p_tr) * gap
+      p_br = p_br + (center - p_br) * gap
+      p_bl = p_bl + (center - p_bl) * gap
 
       sub_quad = np.array([p_tl, p_tr, p_br, p_bl], dtype=np.float64)
-
-      _area_range = []
-      for i in range(len(area_range)):
-        if area_range[i] < 1:
-          _area_range.append(area_range[i] * (avg_w * avg_h))
-        else:
-          _area_range.append(area_range[i])
-      _area_range = sorted(_area_range)
-      print(f"sub_quad: {sub_quad}, area: {cv2.contourArea(np.array(sub_quad, dtype=np.int32))}, area_range: {_area_range}, distortion: {distortion}")
-      # 如果该碎片的长宽比超过了 distortion 允许的阈值，则直接丢弃，不加入结果
-      if _is_acceptable(sub_quad, distortion):
-        # 如果该碎片的面积在指定范围内，则加入结果
-        if _area_range[0] <= cv2.contourArea(np.array(sub_quad, dtype=np.int32)) <= _area_range[1]:
-          segments.append(OffsetImg(sub_quad, offset=(p_tl[0], p_tl[1])))
+      area = abs(cv2.contourArea(sub_quad.astype(np.float32)))
+      # 长宽比超过 distortion 允许的阈值、或面积不在范围内的碎片直接丢弃
+      if _is_acceptable(sub_quad, distortion) and area_lo <= area <= area_hi:
+        # 坐标必须保持 float64（绝对图像坐标），不能用 OffsetImg 承载
+        segments.append(QuadSegment(sub_quad))
 
   return segments
 
 
-def get_flat_quad(img: NDArray[np.uint8]):
+def _warp_to_square(img, quad, size=64):
+  """把四边形区域透视变换成 size×size 的正方形，便于在同一坐标系下做检查"""
+  size = int(size)
+  dst = np.array([[0, 0], [size - 1, 0], [size - 1, size - 1], [0, size - 1]],
+                 dtype=np.float32)
+  M = cv2.getPerspectiveTransform(np.asarray(quad, dtype=np.float32), dst)
+  return cv2.warpPerspective(img, M, (size, size), flags=cv2.INTER_LINEAR)
+
+
+def _line_angles(gray, canny=(50, 150), min_len=40, max_gap=8) -> NDArray[np.float64]:
+  """检测图中的长直线方向（0~180°，不区分正反）"""
+  edges = cv2.Canny(gray, int(canny[0]), int(canny[1]))
+  lines = cv2.HoughLinesP(edges, 1, np.pi / 180.0, threshold=60,
+                          minLineLength=int(min_len), maxLineGap=int(max_gap))
+  if lines is None:
+    return np.zeros(0, dtype=np.float64)
+  seg = np.asarray(lines, dtype=np.float64).reshape(-1, 4)
+  return np.degrees(np.arctan2(seg[:, 3] - seg[:, 1],
+                               seg[:, 2] - seg[:, 0])) % 180.0
+
+
+def _angle_gap(a, b) -> float:
+  """两个 0~180° 方向之间的最小夹角"""
+  d = abs(float(a) - float(b)) % 180.0
+  return min(d, 180.0 - d)
+
+
+def _plane_residual(patch) -> float:
+  """最小二乘拟合平面（ax + by + c）后的残差 RMS，单位是灰度级"""
+  p = np.asarray(patch, dtype=np.float32)
+  h, w = p.shape
+  yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+  A = np.stack([xx.ravel(), yy.ravel(), np.ones(h * w, np.float32)], axis=1)
+  coef, *_ = np.linalg.lstsq(A, p.ravel(), rcond=None)
+  r = A @ coef - p.ravel()
+  return float(np.sqrt((r ** 2).mean()))
+
+
+def is_planar_quad(gray, quad, flat_mask=None, line_angles=None, size=64,
+                   min_flat_ratio=0.85, max_edge_ratio=0.05,
+                   edge_thresh=45.0, max_plane_rms=8.0,
+                   angle_tol=15.0, min_aligned_edges=2,
+                   min_lines_for_angle_check=6) -> bool:
+  """判断四边形区域是否像一块「平板」（可以往上贴数字）
+
+  四项检查：
+  1. **内部平整**：把区域正射到正方形后统计强边缘像素占比，折痕 / 跨物体都会超标；
+  2. **平坦覆盖**：四边形内落在平坦掩膜里的比例 >= ``min_flat_ratio``；
+  3. **平面拟合**：用 ax + by + c 拟合亮度，残差 RMS 超过 ``max_plane_rms``
+     说明区域内有折痕或两块不同表面；
+  4. **透视一致**：四边形的边方向应与图中检测到的长直线方向一致
+     （墙 / 柜面 / 桌面的真实棱边不会乱飘），至少 ``min_aligned_edges`` 条边
+     能在 ``angle_tol`` 内对齐；图中直线太少（< ``min_lines_for_angle_check``）
+     时该项信息不足，直接跳过。
+
+  Args:
+      gray (NDArray[np.uint8]): 灰度环境图
+      quad (NDArray[np.float64]): 四边形，(4, 2)，顺序 [左上, 右上, 右下, 左下]
+      flat_mask (NDArray[np.uint8] | None): 平坦区域掩膜（255 = 平坦）
+      line_angles (NDArray[np.float64] | None): ``_line_angles`` 的输出
+      size (int): 正射检查用的正方形边长
+      min_flat_ratio (float): 四边形内平坦像素的最低占比
+      max_edge_ratio (float): 四边形内强边缘像素允许的最大占比
+      edge_thresh (float): 判定强边缘的梯度幅值阈值
+      max_plane_rms (float): 平面拟合残差 RMS 上限（灰度级）
+      angle_tol (float): 边方向与场景直线方向的对齐容差（度）
+      min_aligned_edges (int): 至少多少条边对齐
+      min_lines_for_angle_check (int): 少于这么多条场景直线时跳过透视一致性检查
+
+  Returns:
+      bool: 是否像一块平板
+  """
+  q = np.asarray(quad, dtype=np.float64).reshape(4, 2)
+
+  patch = _warp_to_square(gray, q, size)
+  gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)
+  gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)
+  mag = cv2.magnitude(gx, gy)[2:-2, 2:-2]
+  if float((mag > edge_thresh).mean()) > max_edge_ratio:
+    return False
+
+  core = patch[2:-2, 2:-2]
+  if _plane_residual(core) > max_plane_rms:
+    return False
+
+  if flat_mask is not None:
+    m = _warp_to_square(flat_mask, q, size)[2:-2, 2:-2]
+    if float((m > 127).mean()) < min_flat_ratio:
+      return False
+
+  if line_angles is not None and len(line_angles) >= min_lines_for_angle_check:
+    angles = np.asarray(line_angles, dtype=np.float64)
+    aligned = 0
+    for i in range(4):
+      d = q[(i + 1) % 4] - q[i]
+      a = float(np.degrees(np.arctan2(d[1], d[0])) % 180.0)
+      if np.min(np.abs([_angle_gap(a, b) for b in angles])) <= angle_tol:
+        aligned += 1
+    if aligned < min_aligned_edges:
+      return False
+
+  return True
+
+
+def get_flat_quad(img: NDArray[np.uint8], planar_check=True):
   """获得图片平滑区域，返回四边形
 
   Args:
     img (NDArray[np.uint8]): 输入的图像，可以bgr或gray，数据类型为 uint8
+    planar_check (bool): 是否做平面性校验（剔除非平面 / 跨物体的四边形）
   Returns:
     NDArray[np.float64]: 四边形顶点坐标，形状为 (4, 2)
   """
   gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-  mask = cv2.blur(gray, (5, 5))
   mask = _smooth_mask(gray)
   cv2.imencode('.png', mask)[1].tofile(
       f"{LOG_DIR}/{img.shape}_debug_0_mask.png")
@@ -237,31 +402,636 @@ def get_flat_quad(img: NDArray[np.uint8]):
       quads, dtype=np.int32), -1, (0, 255, 0), 2)
   cv2.imencode('.png', _img)[1].tofile(
       f"{LOG_DIR}/{img.shape}_debug_1_quads.png")
-  # quads = [q for q in quads if cv2.contourArea(q) >= max(_area_range[0], _area_range[1])]
 
-  quads = [order_quad(q) for q in quads]
+  quads = [order_quad(q, False) for q in quads]
   _img = cv2.drawContours(img.copy(), np.array(
       quads, dtype=np.int32), -1, (0, 255, 0), 2)
   cv2.imencode('.png', _img)[1].tofile(
       f"{LOG_DIR}/{img.shape}_debug_2_contours.png")
 
+  if planar_check and quads:
+    angles = _line_angles(gray)
+    ex_keep = []
+    for q in quads:
+      if is_planar_quad(gray, q, mask, angles):
+        ex_keep.append(q)
+    print(f"平面性校验: 保留 {len(ex_keep)} / 剔除 {len(quads) - len(ex_keep)}")
+    quads = ex_keep
+    _img = cv2.drawContours(img.copy(), np.array(
+        quads, dtype=np.int32), -1, (0, 255, 0), 2) if quads else img.copy()
+    cv2.imencode('.png', _img)[1].tofile(
+        f"{LOG_DIR}/{img.shape}_debug_3_planar.png")
+
   return quads
 
 
-def fuse_img(img_items, img_env, config):
-  """将img_items图像融合进img_env, 通常img_item是前景色为白色，背景色为黑色的简单图片
+# ---------------------------------------------------------------------------
+# 数字融合 / 景深失焦
+# ---------------------------------------------------------------------------
+
+# 默认的「数字 / 环境」对比度区间（|数字 - 背景| / 255）
+CONTRAST_RANGE: tuple[float, float] = (0.35, 0.70)
+
+
+def pick_contrast(contrast=CONTRAST_RANGE) -> float:
+  """取本次使用目标对比度
 
   Args:
-      img_items ([NDArray[np.uint8]]): 简单的前景图像列表，通常是白色前景黑色背景的图片
-      img_env (NDArray[np.uint8]): 环境图像，通常是彩色图像
-      config (dict): 融合配置，包含以下键：
-          - "blend_mode": 融合模式，支持 "add", "multiply", "overlay" 等
-          - "alpha": 融合权重，范围 [0, 1]
-          - "position": 融合位置，(x, y) 坐标
+      contrast (float | tuple[float, float] | Sequence[float]): 固定值 / 二元区间 / 候选集合，
+        取值 0~1，表示 |数字灰度 - 背景亮度| / 255
+
+  Returns:
+      float: 0~1 的目标对比度
   """
-  for img_item in img_items:
-    # 这里可以添加具体的融合逻辑
-    pass
+  if isinstance(contrast, (int, float, np.integer, np.floating)) and not isinstance(contrast, bool):
+    return float(np.clip(contrast, 0.0, 1.0))
+  vals = [float(v) for v in contrast]
+  if not vals:
+    raise ValueError("pick_contrast: 候选对比度为空")
+  if isinstance(contrast, tuple) and len(vals) == 2:
+    return float(np.clip(random.uniform(*sorted(vals)), 0.0, 1.0))
+  return float(np.clip(random.choice(vals), 0.0, 1.0))
+
+
+def contrast_gray(bg, contrast=0.5) -> int:
+  """按目标对比度给数字定色：使 |数字灰度 - 背景亮度| ≈ contrast * 255
+
+  优先朝有余量的方向取（暗背景提亮、亮背景压暗），一侧越界就改走另一侧，
+  两侧都越界时取 0 / 255（此时实际对比度会被截断）。
+
+  Args:
+      bg (float): 贴图落点处的背景亮度 0~255
+      contrast (float): 目标对比度 0~1
+
+  Returns:
+      int: 数字灰度 0~255
+  """
+  bg = float(bg)
+  c = float(np.clip(contrast, 0.0, 1.0)) * 255.0
+  up, down = bg + c, bg - c
+  up_ok, down_ok = up <= 255.0, down >= 0.0
+  if up_ok and down_ok:
+    return int(round(up if bg < 127.0 else down))
+  if up_ok:
+    return int(round(up))
+  if down_ok:
+    return int(round(down))
+  return 255 if bg < 127.0 else 0
+
+
+def pick_alpha(alpha=(0.5, 1.0)) -> float:
+  """取数字与环境图的融合透明度
+
+  Args:
+      alpha (float | tuple[float, float] | Sequence[float]): 固定值 / 二元区间 / 候选集合
+
+  Returns:
+      float: 0~1，越大数字越「实」
+  """
+  if isinstance(alpha, (int, float, np.integer, np.floating)) and not isinstance(alpha, bool):
+    return float(np.clip(alpha, 0.0, 1.0))
+  vals = [float(v) for v in alpha]
+  if not vals:
+    raise ValueError("pick_alpha: 候选透明度为空")
+  if isinstance(alpha, tuple) and len(vals) == 2:
+    return float(np.clip(random.uniform(*sorted(vals)), 0.0, 1.0))
+  return float(np.clip(random.choice(vals), 0.0, 1.0))
+
+
+def _glyph_coverage(glyph) -> NDArray[np.float32]:
+  """把数字贴图转成 0~1 的前景覆盖度（保留抗锯齿 / 模糊产生的软边）
+
+  约定贴图是「白字黑底」。若整幅偏亮（平均灰度 > 127），认为它是黑字白底，自动取反。
+  """
+  g = glyph if glyph.ndim == 2 else cv2.cvtColor(glyph, cv2.COLOR_BGR2GRAY)
+  g = g.astype(np.float32)
+  if float(g.mean()) > 127.0:
+    g = 255.0 - g
+  return g / 255.0
+
+
+def _clip_window(offset, h, w, H, W):
+  """把贴图窗口裁到画布内
+
+  Returns:
+      tuple[int, int, int, int, int, int] | None: (dx0, dy0, dx1, dy1, sx0, sy0)，
+      即画布上的目标矩形与贴图内的源起点；完全落在画布外时返回 None
+  """
+  x0, y0 = int(round(float(offset[0]))), int(round(float(offset[1])))
+  dx0, dy0 = max(x0, 0), max(y0, 0)
+  dx1, dy1 = min(x0 + w, W), min(y0 + h, H)
+  if dx1 <= dx0 or dy1 <= dy0:
+    return None
+  return dx0, dy0, dx1, dy1, dx0 - x0, dy0 - y0
+
+
+def local_background(img_env, glyph, offset=None) -> float:
+  """贴图落点处环境图的背景亮度（中位数），用于按对比度给数字定色
+
+  Args:
+      img_env (NDArray[np.uint8]): 环境图
+      glyph (NDArray[np.uint8]): 数字贴图（用来确定落点尺寸）
+      offset (tuple[float, float] | None): 贴图左上角坐标，缺省取 ``glyph.offset``
+
+  Raises:
+      ValueError: 既没有传入 offset，贴图也没有 offset 元数据
+
+  Returns:
+      float: 0~255 的背景亮度
+  """
+  if offset is None:
+    offset = getattr(glyph, "offset", None)
+  if offset is None:
+    raise ValueError("缺少 offset：请显式传入贴图左上角坐标，或使用 proj_tran 的返回值")
+  env = np.asarray(img_env)
+  H, W = env.shape[:2]
+  win = _clip_window(offset, glyph.shape[0], glyph.shape[1], H, W)
+  if win is None:
+    return float(env.mean())
+  dx0, dy0, dx1, dy1, _, _ = win
+  return float(np.median(env[dy0:dy1, dx0:dx1]))
+
+
+def fuse_img(img_env, glyph, offset=None, gray=None, contrast=0.5, alpha=1.0):
+  """将「白字黑底」数字贴图按对比度与透明度融合进环境图（第一步：融合）
+
+  逐像素 alpha 合成：``out = env * (1 - a) + gray * a``，其中 ``a = 覆盖度 * alpha``，
+  覆盖度取自贴图灰度，因此失焦后的软边会被自然保留。
+
+  数字颜色不再是固定色阶，而是按「与局部背景的对比度」自动确定：
+  ``|gray - bg| ≈ contrast * 255``，保证数字在任何底色上都保持一致的可见度。
+
+  Args:
+      img_env (NDArray[np.uint8]): 环境图，BGR 或灰度
+      glyph (NDArray[np.uint8]): 白字黑底的数字贴图，通常由 ``proj_tran`` 得到
+      offset (tuple[float, float] | None): 贴图左上角在环境图中的绝对坐标；
+        缺省时取 ``glyph.offset``（``proj_tran`` 的返回值自带）
+      gray (int | None): 直接指定数字灰度；给定时忽略 ``contrast``
+      contrast (float): 目标对比度 0~1，缺省 0.5，用于自动定色
+      alpha (float): 融合强度 0~1，越大数字越实
+
+  Raises:
+      ValueError: 既没有传入 offset，贴图也没有 offset 元数据
+
+  Returns:
+      NDArray[np.uint8]: 融合后的新图（不修改入参）
+  """
+  if offset is None:
+    offset = getattr(glyph, "offset", None)
+  if offset is None:
+    raise ValueError("缺少 offset：请显式传入贴图左上角坐标，或使用 proj_tran 的返回值")
+
+  cov = _glyph_coverage(glyph)
+  h, w = cov.shape
+  out = np.array(img_env, copy=True)
+  H, W = out.shape[:2]
+  win = _clip_window(offset, h, w, H, W)
+  if win is None:
+    return out
+  dx0, dy0, dx1, dy1, sx0, sy0 = win
+
+  if gray is None:
+    gray = contrast_gray(local_background(img_env, glyph, offset), contrast)
+  gray = int(np.clip(gray, 0, 255))
+  alpha = float(np.clip(alpha, 0.0, 1.0))
+
+  tile = cov[sy0:sy0 + (dy1 - dy0), sx0:sx0 + (dx1 - dx0)]
+  a = tile * alpha
+  region = out[dy0:dy1, dx0:dx1].astype(np.float32)
+  color = np.full_like(region, float(gray))
+  if region.ndim == 3:
+    a = a[..., None]
+  out[dy0:dy1, dx0:dx1] = np.clip(
+      region * (1.0 - a) + color * a, 0, 255).astype(np.uint8)
+
+  return out
+
+
+def _gaussian(glyph, sigma):
+  """固定 sigma 的整块高斯模糊（sigma <= 0 时原样返回）"""
+  if sigma is None or float(sigma) <= 0:
+    return glyph
+  sigma = float(sigma)
+  k = int(2 * math.ceil(3.0 * sigma) + 1)
+  return cv2.GaussianBlur(glyph, (k, k), sigma)
+
+
+def _relative_taper(near_len, far_len) -> float:
+  """(近边 - 远边) / 长边，范围 [-1, 1]，表示该方向的透视收缩强度"""
+  m = max(abs(near_len), abs(far_len), 1e-6)
+  return float((near_len - far_len) / m)
+
+
+def quad_perspective_ramp(quad, size):
+  """按四边形的透视收缩关系生成 0（近）~1（远）的平滑深度渐变图
+
+  透视规律：同一平面上越远的部分在图像里越小。于是分别比较上/下两条边、
+  左/右两条边，较短的一侧视为更远，两方向合成为四个角点的相对远近，
+  再双线性插值成与贴图同尺寸的渐变图（贴图正是该四边形的透视变换结果）。
+
+  Args:
+      quad (NDArray[np.float64]): 四边形，(4, 2)，顺序 [左上, 右上, 右下, 左下]
+      size (tuple[int, int]): 贴图尺寸 (宽, 高)
+
+  Returns:
+      NDArray[np.float32]: 形状 (h, w) 的渐变图，0 = 最近，1 = 最远；
+      四边形是正矩形（无透视线索）时返回常数 0.5
+  """
+  q = np.asarray(quad, dtype=np.float64).reshape(4, 2)
+  w, h = int(size[0]), int(size[1])
+  h, w = max(h, 1), max(w, 1)
+
+  w_top = float(np.linalg.norm(q[1] - q[0]))
+  w_bot = float(np.linalg.norm(q[2] - q[3]))
+  h_left = float(np.linalg.norm(q[3] - q[0]))
+  h_right = float(np.linalg.norm(q[2] - q[1]))
+
+  # 底边比顶边长 => 上远下近（正值 = 上远）；右边比左边长 => 左远右近（正值 = 左远）
+  s_vert = _relative_taper(w_bot, w_top)
+  s_horz = _relative_taper(h_right, h_left)
+
+  tl = (s_vert + s_horz) / 2.0
+  tr = (s_vert - s_horz) / 2.0
+  bl = (-s_vert + s_horz) / 2.0
+  br = (-s_vert - s_horz) / 2.0
+  corners = np.array([[tl, tr], [bl, br]], np.float32)
+
+  peak = float(np.abs(corners).max())
+  if peak < 1e-6:
+    return np.full((h, w), 0.5, np.float32)   # 正矩形，没有可用的透视线索
+  corners /= peak
+
+  ramp = cv2.resize(corners, (w, h), interpolation=cv2.INTER_LINEAR)
+  return np.clip((ramp + 1.0) / 2.0, 0.0, 1.0).astype(np.float32)
+
+
+def quad_point(quad, u, v):
+  """按双线性参数在四边形内取点（u / v ∈ [0, 1]，对应 [左上, 右上, 右下, 左下]）"""
+  q = np.asarray(quad, dtype=np.float64).reshape(4, 2)
+  p_top = (1.0 - u) * q[0] + u * q[1]
+  p_bot = (1.0 - u) * q[3] + u * q[2]
+  return (1.0 - v) * p_top + v * p_bot
+
+
+def inset_quad(quad, margin=0.18):
+  """把四边形按参数比例向内收缩，得到数字在板面上占据的区域
+
+  Args:
+      quad (NDArray[np.float64]): 板面四边形，(4, 2)，[左上, 右上, 右下, 左下]
+      margin (float): 内缩比例（0~0.45），模拟数字与板边的留白
+
+  Returns:
+      NDArray[np.float64]: 内缩后的四边形，(4, 2)
+  """
+  m = float(np.clip(margin, 0.0, 0.45))
+  lo, hi = m, 1.0 - m
+  return np.array([quad_point(quad, lo, lo), quad_point(quad, hi, lo),
+                   quad_point(quad, hi, hi), quad_point(quad, lo, hi)],
+                  dtype=np.float64)
+
+
+def _pick_tone(tone) -> float:
+  """取一个亮度偏移：固定值 / 二元区间 / 候选序列"""
+  if isinstance(tone, (int, float, np.integer, np.floating)) and not isinstance(tone, bool):
+    return float(tone)
+  vals = [float(v) for v in tone]
+  if not vals:
+    raise ValueError("_pick_tone: 候选亮度偏移为空")
+  if isinstance(tone, tuple) and len(vals) == 2:
+    lo, hi = sorted(vals)
+    return random.uniform(lo, hi)
+  return random.choice(vals)
+
+
+def _ramp_full(quad, H, W) -> NDArray[np.float32]:
+  """把四边形内部的 0(近)~1(远) 透视渐变铺到整幅画布上（四边形外取 0.5）"""
+  ramp_full = np.full((H, W), 0.5, np.float32)
+  q = np.asarray(quad, dtype=np.float64).reshape(4, 2)
+  x0 = max(int(np.floor(q[:, 0].min())), 0)
+  y0 = max(int(np.floor(q[:, 1].min())), 0)
+  x1 = min(int(np.ceil(q[:, 0].max())) + 1, W)
+  y1 = min(int(np.ceil(q[:, 1].max())) + 1, H)
+  if x1 > x0 and y1 > y0:
+    ramp_full[y0:y1, x0:x1] = quad_perspective_ramp(q, (x1 - x0, y1 - y0))
+  return ramp_full
+
+
+def _defocus_mask(mask, quad, sigma, spread=0.5, base=0.0) -> NDArray[np.float32]:
+  """对二值掩膜做与数字一致的失焦，返回 0~1 的软覆盖度
+
+  Args:
+      mask (NDArray[np.uint8]): 0/255 二值掩膜
+      quad (NDArray[np.float64]): 掩膜对应的四边形（用于块内的近清远糊渐变）
+      sigma (float): 基准高斯 sigma（对应近端），<= 0 表示不失焦
+      spread (float): 远近两端 sigma 差异比例
+      base (float): 基础柔边 sigma（叠加在 sigma 上）
+
+  Returns:
+      NDArray[np.float32]: 0~1 的覆盖度，尺寸与 ``mask`` 一致
+  """
+  base = max(float(base), 0.0)
+  sigma = 0.0 if sigma is None else max(float(sigma), 0.0)
+  if sigma <= 0 and base <= 0:
+    return mask.astype(np.float32) / 255.0
+  if sigma <= 0:
+    return cv2.GaussianBlur(mask, (0, 0), base).astype(np.float32) / 255.0
+
+  spread = float(np.clip(spread, 0.0, 0.9))
+  near = cv2.GaussianBlur(mask, (0, 0), sigma * (1.0 - spread) + base)
+  far = cv2.GaussianBlur(mask, (0, 0), sigma * (1.0 + spread) + base)
+  H, W = mask.shape[:2]
+  wmap = _ramp_full(quad, H, W)
+  return np.clip((near.astype(np.float32) * (1.0 - wmap) +
+                  far.astype(np.float32) * wmap) / 255.0, 0.0, 1.0)
+
+
+def draw_board(img_env, quad, tone_delta=18.0, feather=2.0,
+               shadow=True, shadow_offset=(4, 6),
+               shadow_blur=9.0, shadow_alpha=0.35,
+               sigma=0.0, persp_spread=0.5):
+  """在环境图上渲染一块「板」：整体调色 + 失焦柔边 + 软投影
+
+  数字就贴在这块板上。板面和数字使用同一套失焦：``sigma`` 越大，
+  板边越糊（同样带四边形内部的近清远糊渐变），这样离基准平面越远的板
+  连轮廓都不会是“刀切”般清晰。
+
+  Args:
+      img_env (NDArray[np.uint8]): 环境图（BGR 或灰度）
+      quad (NDArray[np.float64]): 板面四边形，(4, 2)
+      tone_delta (float | tuple | Sequence): 板面与背景的亮度差（正 = 更亮）
+      feather (float): 基础边缘柔化 sigma（像素）
+      shadow (bool): 是否画软投影
+      shadow_offset (tuple[float, float]): 投影相对板面的偏移
+      shadow_blur (float): 投影额外的模糊 sigma
+      shadow_alpha (float): 投影不透明度
+      sigma (float): 失焦量（与数字使用同一个值），0 表示只做基础柔边
+      persp_spread (float): 板内「近端 → 远端」的失焦差异比例
+
+  Returns:
+      NDArray[np.uint8]: 画好板的新图（不修改入参）
+  """
+  out = np.array(img_env, copy=True)
+  H, W = out.shape[:2]
+  mask = np.zeros((H, W), np.uint8)
+  cv2.fillConvexPoly(mask, np.round(quad).astype(np.int32), 255)
+  if not mask.any():
+    return out
+
+  if shadow:
+    sh = np.zeros_like(mask)
+    M = np.float32([[1, 0, float(shadow_offset[0])],
+                    [0, 1, float(shadow_offset[1])]])
+    cv2.warpAffine(mask, M, (W, H), dst=sh, borderValue=0)
+    # 投影跟着板一起失焦
+    sh_sigma = max(float(shadow_blur), 0.0) + max(float(sigma), 0.0)
+    sa = _defocus_mask(sh, quad, 0.0, base=sh_sigma)
+    sa = sa * float(np.clip(shadow_alpha, 0.0, 1.0))
+    if out.ndim == 3:
+      sa = sa[..., None]
+    out = np.clip(out.astype(np.float32) * (1.0 - sa), 0, 255).astype(np.uint8)
+
+  bg = float(np.median(out[mask > 127]))
+  target = float(np.clip(bg + _pick_tone(tone_delta), 0, 255))
+  a = _defocus_mask(mask, quad, sigma, persp_spread, base=feather)
+  if out.ndim == 3:
+    a = a[..., None]
+  out = np.clip(out.astype(np.float32) * (1.0 - a) + target * a,
+                0, 255).astype(np.uint8)
+  return out
+
+
+def defocus_glyph(glyph, sigma, ramp=None, spread=0.5):
+  """对数字贴图做高斯模糊，模拟失焦
+
+  不给 ramp 时是整块均匀模糊；给了 ramp（0 = 近，1 = 远）时，按
+  「近端清晰、远端更糊」在 ``sigma * (1 ∓ spread)`` 两档之间渐变，
+  从而保留数字所在平面的透视关系，而不是整块一起糊掉。
+
+  Args:
+      glyph (NDArray[np.uint8]): 数字贴图
+      sigma (float): 基准高斯 sigma（对应近端），<= 0 时原样返回
+      ramp (NDArray[np.float32] | None): ``quad_perspective_ramp`` 的输出
+      spread (float): 远近两端的 sigma 差异比例，0 = 均匀失焦，0.5 = 远端 1.5 倍
+
+  Returns:
+      NDArray[np.uint8]: 模糊后的贴图（sigma <= 0 时为原对象）
+  """
+  if sigma is None or float(sigma) <= 0:
+    return glyph
+  sigma = float(sigma)
+  if ramp is None:
+    return _gaussian(glyph, sigma)
+
+  spread = float(np.clip(spread, 0.0, 0.9))
+  near = _gaussian(glyph, sigma * (1.0 - spread))
+  far = _gaussian(glyph, sigma * (1.0 + spread))
+
+  wmap = np.asarray(ramp, dtype=np.float32)
+  if wmap.shape[:2] != glyph.shape[:2]:
+    wmap = cv2.resize(wmap, (glyph.shape[1], glyph.shape[0]),
+                      interpolation=cv2.INTER_LINEAR)
+  wmap = wmap if glyph.ndim == 2 else wmap[..., None]
+
+  return np.clip(near.astype(np.float32) * (1.0 - wmap) + far.astype(np.float32) * wmap,
+                 0, 255).astype(np.uint8)
+
+
+def _minmax_norm(values) -> NDArray[np.float64]:
+  """批次内 min-max 归一化；所有值相同时统一取 0.5"""
+  v = np.asarray(values, dtype=np.float64)
+  if v.size == 0:
+    return v
+  lo, hi = float(v.min()), float(v.max())
+  if hi - lo < 1e-9:
+    return np.full_like(v, 0.5)
+  return (v - lo) / (hi - lo)
+
+
+def estimate_depths(quads, img_shape,
+                    size_weight=0.55, position_weight=0.30,
+                    taper_weight=0.15) -> NDArray[np.float64]:
+  """估计每块四边形所在平面的相对深度：0 = 最近，1 = 最远
+
+  三个线索（都先在本批次内 min-max 归一化再加权）：
+  1. 表观尺寸：√面积 越小越远（远小近大）
+  2. 画面纵向位置：越靠上越远（地面 / 桌面场景先验）
+  3. 透视收缩：底边 / 顶边 比值越大（上窄下宽）越远
+
+  Args:
+      quads (list[NDArray]): 四边形列表，形状 (4, 2)，顺序 [左上, 右上, 右下, 左下]
+      img_shape (tuple): 环境图尺寸，取 ``img_shape[0]`` 作为画面高度
+      size_weight (float): 尺寸线索权重
+      position_weight (float): 纵向位置线索权重
+      taper_weight (float): 透视收缩线索权重
+
+  Returns:
+      NDArray[np.float64]: 形状 (N,) 的深度，0 最近、1 最远
+  """
+  qs = [np.asarray(q, dtype=np.float64).reshape(4, 2) for q in quads]
+  if not qs:
+    return np.zeros(0, dtype=np.float64)
+
+  height = max(float(img_shape[0]), 1.0)
+  area = np.array([abs(cv2.contourArea(q.astype(np.float32))) for q in qs])
+  center_y = np.array([q[:, 1].mean() for q in qs])
+  w_top = np.array([np.linalg.norm(q[1] - q[0]) for q in qs])
+  w_bot = np.array([np.linalg.norm(q[2] - q[3]) for q in qs])
+  taper = w_bot / np.maximum(w_top, 1e-6)
+
+  f_size = 1.0 - _minmax_norm(np.sqrt(np.maximum(area, 0.0)))    # 越小越远
+  f_pos = 1.0 - _minmax_norm(center_y / height)                  # 越上越远
+  f_taper = _minmax_norm(np.log(np.clip(taper, 1e-3, 1e3)))      # 收缩越强越远
+
+  depth = (size_weight * f_size + position_weight * f_pos +
+           taper_weight * f_taper)
+  return _minmax_norm(depth)
+
+
+def pick_base_plane(depths, tol=0.12):
+  """根据深度分布挑选基准平面：取深度最集中的一簇（簇内差 <= tol）
+
+  以每个深度为候选中心统计成员数，成员最多者胜出；成员数相同时取更紧凑的一簇。
+
+  Args:
+      depths (Sequence[float]): ``estimate_depths`` 的输出
+      tol (float): 判定「同一平面」的深度容差
+
+  Returns:
+      tuple[float, NDArray[np.bool_]]: (基准平面深度, 每块是否在基准平面上)
+
+  Raises:
+      ValueError: depths 为空
+  """
+  d = np.asarray(depths, dtype=np.float64).ravel()
+  if d.size == 0:
+    raise ValueError("pick_base_plane: depths 为空")
+
+  best_key = None
+  best_center = float(d[0])
+  best_mask = np.ones(d.shape, dtype=bool)
+  for c in d:
+    mask = np.abs(d - c) <= tol
+    key = (int(mask.sum()), -float(np.abs(d[mask] - c).mean()))
+    if best_key is None or key > best_key:
+      best_key, best_center, best_mask = key, float(d[mask].mean()), mask
+  return best_center, best_mask
+
+
+def defocus_sigma(depth, base_depth, strength=1.0, max_sigma=12.0) -> float:
+  """按「与基准平面的深度差」换算高斯 sigma（失焦程度可调）
+
+  Args:
+      depth (float): 该数字的深度
+      base_depth (float): 基准平面的深度
+      strength (float): 失焦强度倍率，0 表示全部清晰，越大越糊
+      max_sigma (float): 允许的最大 sigma（像素），同时也是封顶值
+
+  Returns:
+      float: 高斯 sigma，0 表示不模糊
+  """
+  gap = abs(float(depth) - float(base_depth))
+  return float(np.clip(float(strength) * float(max_sigma) * gap,
+                       0.0, float(max_sigma)))
+
+
+def fuse_scene(img_env, glyphs, segments,
+               contrast=CONTRAST_RANGE, alpha=(0.55, 0.95),
+               base_depth=None, plane_tol=0.12,
+               defocus_strength=1.0, max_sigma=12.0,
+               persp_spread=0.5,
+               digit_quads=None, board_tone=None,
+               board_shadow=True, board_feather=2.0,
+               size_ratio=0.0):
+  """把一批数字贴图融合进环境图，并按基准平面做景深失焦
+
+  完整流程：先给每块四边形画上一块“板” → 估计各块板的深度 → 确定基准平面
+  → 非基准平面上的数字按深度差做高斯模糊（块内再按四边形透视关系做近清远糊）
+  → 按与局部背景的对比度定色并融合进环境图。
+
+  Args:
+      img_env (NDArray[np.uint8]): 环境图，BGR 或灰度
+      glyphs (list[NDArray[np.uint8]]): 白字黑底的数字贴图（已经是 ``digit_quads`` 的透视结果）
+      segments (list[QuadSegment]): 板面四边形（提供 ``quad``）
+      contrast (float | tuple | Sequence[float]): 数字/背景对比度，见 ``pick_contrast``
+      alpha (float | tuple | Sequence[float]): 融合透明度，见 ``pick_alpha``
+      base_depth (float | None): 手动指定基准平面深度；None 表示自动挑选最集中的深度簇
+      plane_tol (float): 判定「同一平面」的深度容差
+      defocus_strength (float): 失焦强度倍率（0 = 全部清晰）
+      max_sigma (float): 单块贴图允许的最大高斯 sigma（像素）
+      persp_spread (float): 单块内部「近端 → 远端」的失焦差异比例，0 = 均匀
+      digit_quads (list[NDArray] | None): 数字实际占据的四边形（通常用
+        ``inset_quad`` 从板面收缩而来）；None 表示数字铺满板面
+      board_tone (float | tuple | Sequence | None): 板面亮度差；None 表示不画板
+      board_shadow (bool): 是否给板画软投影
+      board_feather (float): 板边柔化 sigma
+      size_ratio (float): 失焦上限 = ``size_ratio * min(数字贴图宽, 高)``，
+        用于保证远处的小数字仍可辨认；0 表示不限
+
+  Raises:
+      ValueError: glyphs / segments / digit_quads 数量不一致
+
+  Returns:
+      tuple[NDArray[np.uint8], list[dict]]: (融合后的图, 每块数字的
+      digit_quad / quad / depth / sigma / contrast / gray / bg / alpha / on_base 信息)
+  """
+  gs = list(glyphs)
+  segs = list(segments)
+  if len(gs) != len(segs):
+    raise ValueError(f"glyphs({len(gs)}) 与 segments({len(segs)}) 数量不一致")
+  dquads = [np.asarray(q, dtype=np.float64).reshape(4, 2)
+            for q in ([s.quad for s in segs] if digit_quads is None else digit_quads)]
+  if len(dquads) != len(segs):
+    raise ValueError(f"digit_quads({len(dquads)}) 与 segments({len(segs)}) 数量不一致")
+
+  out = np.array(img_env, copy=True)
+  depths = estimate_depths([s.quad for s in segs], out.shape)
+  if base_depth is None:
+    base_depth, on_base = pick_base_plane(depths, plane_tol)
+  else:
+    base_depth = float(base_depth)
+    on_base = np.abs(depths - base_depth) <= plane_tol
+  sigmas = [defocus_sigma(d, base_depth, defocus_strength, max_sigma)
+            for d in depths]
+  if size_ratio > 0:
+    # 失焦封顶随数字尺寸缩放：小数字不应该被糊到认不出来
+    sigmas = [min(s, float(size_ratio) * float(min(g.shape[:2])))
+              for s, g in zip(sigmas, gs)]
+
+  # 先把板画上（板面和数字用同一个 sigma 失焦），数字才是“写在板上”的
+  if board_tone is not None:
+    for seg, sg in zip(segs, sigmas):
+      out = draw_board(out, seg.quad, tone_delta=board_tone,
+                       feather=board_feather, shadow=board_shadow,
+                       sigma=sg, persp_spread=persp_spread)
+
+  infos = []
+  for i, (glyph, seg, dquad) in enumerate(zip(gs, segs, dquads)):
+    sigma = sigmas[i]
+    # 贴图就是该四边形的透视变换结果，用四边形形状决定块内的远近方向
+    ramp = quad_perspective_ramp(dquad, (glyph.shape[1], glyph.shape[0]))
+    layer = defocus_glyph(glyph, sigma, ramp, persp_spread)
+
+    offset = (float(dquad[:, 0].min()), float(dquad[:, 1].min()))
+    contrast_v = pick_contrast(contrast)
+    bg = local_background(out, layer, offset)
+    gray_v = contrast_gray(bg, contrast_v)
+    alpha_v = pick_alpha(alpha)
+
+    out = fuse_img(out, layer, offset, gray=gray_v, alpha=alpha_v)
+    infos.append({
+        "depth": float(depths[i]),
+        "sigma": float(sigma),
+        "contrast": float(contrast_v),
+        "gray": int(gray_v),
+        "bg": float(bg),
+        "alpha": float(alpha_v),
+        "on_base": bool(on_base[i]),
+        "offset": offset,
+        "quad": seg.quad.tolist(),
+        "digit_quad": dquad.tolist(),
+    })
+
+  return out, infos
 
 
 if __name__ == "__main__":
@@ -277,8 +1047,10 @@ if __name__ == "__main__":
   else:
     vis = img.copy()
     for i, quad in enumerate(quads):
-      quad = segment_quad(quad, distortion=(0.1, 0.3), normalize=(
-          0.5, 0.8), count=(1, 5), area_range=(1000, 30000))
-      print(f"Quad {i+1}: {quad} segments")
-      cv2.polylines(vis, np.array(quad, dtype=np.int32), True, (0, 255, 0), 2)
-    cv_show(vis, f"Quad {i+1}")
+      segs = segment_quad(quad, distortion=(0.1, 0.3), normalize=(
+          0.5, 0.8), area_range=(1000, 30000))
+      print(f"Quad {i+1}: {len(segs)} segments")
+      for seg in segs:
+        cv2.polylines(vis, [np.round(seg.quad).astype(np.int32)],
+                      True, (0, 255, 0), 2)
+    cv_show(vis, f"Quad {len(quads)} segments")

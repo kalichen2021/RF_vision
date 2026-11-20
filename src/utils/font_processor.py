@@ -33,6 +33,11 @@ FONT_NAMES = [
   "calibrii.ttf",
 ]
 
+def get_available_fonts() -> list[str]:
+  """返回本机实际存在的字体文件名（``FONT_NAMES`` 的子集）"""
+  return [name for name in FONT_NAMES if (FONTS_DIR / name).exists()]
+
+
 def get_font_path(font_name: str | int) -> str:
   if is_number(font_name):
     print(f"font_name is a number: {font_name}")

@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from dataclasses import dataclass
 from numpy.typing import NDArray
 from pathlib import Path
 from .debug_tools import cv_show
@@ -88,12 +89,10 @@ class OffsetImg(np.ndarray):
   """携带偏移量信息的图片。
 
   普通 ndarray 无法附带元数据，因此用子类记录：
-  - ``dst_quad``：目标四边形。``proj_tran`` 据此把输出画布裁剪为其外接矩形，
-    输出尺寸因此与四边形尺寸一致（不再铺满整幅变换后图像的包围盒）；
-  - ``src_size``：生成矩阵时用的源矩形尺寸；为 ``None`` 表示「源尺寸待定」，
-    ``proj_tran`` 会用输入图像的宽高补全，从而把整幅图像拉伸铺满 ``dst_quad``。
+  - ``offset``：该图片在环境图中的左上角坐标 ``(x_min, y_min)``，
+    ``_get_mask`` 据此把贴图贴回整幅画布。
   """
-  offset: NDArray[np.uint8] | None = None
+  offset: NDArray[np.uint32] | None = None
 
   def __new__(cls, img, offset=None):
     obj = np.asarray(img, dtype=np.uint8).view(cls)
@@ -102,6 +101,35 @@ class OffsetImg(np.ndarray):
 
   def __array_finalize__(self, obj):
     self.offset = getattr(obj, "offset", None)
+
+
+@dataclass
+class QuadSegment:
+  """环境图中的一块四边形切块（坐标 + 定位信息）。
+
+  这不是图片，不应用 ``OffsetImg`` 承载 —— 后者会把坐标强转成 ``uint8``，
+  大于 255 的坐标按 256 取模后被折叠到画布左上角。
+
+  Attributes:
+      quad (NDArray[np.float64]): 四边形顶点，形状 (4, 2)，顺序 [左上, 右上, 右下, 左下]，
+        使用环境图的绝对坐标。
+  """
+  quad: NDArray[np.float64]
+
+  def __post_init__(self):
+    self.quad = np.asarray(self.quad, dtype=np.float64).reshape(4, 2)
+
+  @property
+  def offset(self) -> tuple[float, float]:
+    """外接矩形左上角 ``(x_min, y_min)``，与 ``proj_tran`` 输出的 offset 语义一致。"""
+    return float(self.quad[:, 0].min()), float(self.quad[:, 1].min())
+
+  @property
+  def size(self) -> tuple[float, float]:
+    """外接矩形宽高 ``(w, h)``。"""
+    (x0, y0), (x1, y1) = self.offset, (
+        float(self.quad[:, 0].max()), float(self.quad[:, 1].max()))
+    return x1 - x0, y1 - y0
 
 
 def _get_quad_wh(w: int, h: int, M: NDArray[np.floating]) -> tuple[int, int]:
@@ -233,10 +261,8 @@ def proj_tran(img: NDArray[np.uint8], M: NDArray[np.floating], overflow = False,
     x_max, y_max = quad.max(axis=0)
     new_w = max(int(np.ceil(x_max - x_min)), 1)
     new_h = max(int(np.ceil(y_max - y_min)), 1)
-    print(f"proj_tran: {w}x{h} -> {new_w}x{new_h} (dst_quad{', fill' if auto_fill else ''})")
   else:
     new_w, new_h = _get_quad_wh(w, h, M3)
-    print(f"proj_tran: {w}x{h} -> {new_w}x{new_h}")
     corners = np.array([[[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]], dtype=np.float64)
     new_corners = cv2.perspectiveTransform(corners, M3)[0]
     x_min, y_min = np.min(new_corners, axis=0)
