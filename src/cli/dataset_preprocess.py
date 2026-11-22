@@ -121,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     console.print("[yellow]生成数量为 0，无事可做[/]")
     return 0
 
-  out_dir = pathcfg.PROCESSED_DIR / "fused" / _uuid
+  out_dir = pathcfg.PROCESSED_DIR / _uuid
   out_dir.mkdir(parents=True, exist_ok=True)
   pp = build_pp()
   fonts = get_available_fonts()
