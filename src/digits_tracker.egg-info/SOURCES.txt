@@ -3,10 +3,12 @@ pyproject.toml
 src/cli/__init__.py
 src/cli/dataset_preprocess.py
 src/cli/main.py
+src/cli/model_trainer.py
 src/digits_tracker.egg-info/PKG-INFO
 src/digits_tracker.egg-info/SOURCES.txt
 src/digits_tracker.egg-info/dependency_links.txt
 src/digits_tracker.egg-info/entry_points.txt
+src/digits_tracker.egg-info/requires.txt
 src/digits_tracker.egg-info/top_level.txt
 src/hardware/__init__.py
 src/hardware/com.py
@@ -15,6 +17,9 @@ src/preprocess/__init__.py
 src/preprocess/process.py
 src/serving/__init__.py
 src/training/__init__.py
+src/training/dataset.py
+src/training/model.py
+src/training/train.py
 src/utils/__init__.py
 src/utils/debug_tools.py
 src/utils/feature_extration.py

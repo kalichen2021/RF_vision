@@ -183,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
       save_sample(out_dir, name, fused, labels, extra, write_labels=False)
       records.append(build_record(f"{name}.png", fused, labels, extra))
       progress.update(task, advance=1,
-                      note=f"[green]✓[/] {path.name} 数字 {len(labels)} 个")
+                      note=f"[green]ok[/] {path.name} 数字 {len(labels)} 个")
 
   labels_path = save_dataset(out_dir, records)
   elapsed = time.perf_counter() - started

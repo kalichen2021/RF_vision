@@ -128,6 +128,9 @@ class Preprocess:
     self.board_margin = board_margin
     self.board_shadow = board_shadow
     self.defocus_size_ratio = defocus_size_ratio
+    # AREA_RANGE 描述的是「数字四边形」面积；板位要比它大 (1-2*margin)^-2 倍，
+    # 这样 inset_quad 内缩之后，数字面积正好落在 AREA_RANGE 里
+    self.area_scale = (1.0 - 2.0 * float(board_margin)) ** 2
 
   def detect_quads(self, env_img):
     """检测环境图上的平坦区域（同一张图结果确定，批量生成时可缓存复用）
@@ -181,7 +184,9 @@ class Preprocess:
       print("未检测到符合条件的平面区域")
       return None, []
 
-    segments = [s for q in quads for s in segment_quad(q, **self.config)]
+    segments = [s for q in quads
+                for s in segment_quad(q, **self.config,
+                                      area_scale=self.area_scale)]
     if not segments:
       print("分割后没有符合 distortion/area 条件的四边形")
       return None, []

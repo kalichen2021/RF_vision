@@ -1,5 +1,6 @@
 from configs.path import RAW_DIR, LOG_DIR
 import cv2
+import itertools
 import sys
 import numpy as np
 import random
@@ -40,28 +41,61 @@ def _smooth_mask(gray, win=15, var_thresh=8.0, iter=1):
 
 
 def _get_maxquad(cnt):
-  """获取轮廓的最大内接四边形
+  """获取轮廓的近似四边形
+
+  策略（逐级兜底，保证大的平坦区域不会因为轮廓不够规整被整块丢掉）：
+
+  1. 用递增 epsilon 的 ``approxPolyDP``，取第一个 4 点凸多边形；
+  2. 得不到 4 点时，把轮廓粗近似成 5~12 个顶点，枚举 4 点子集取面积最大的
+     凸四边形（近似「最大内接四边形」）；
+  3. 仍失败时退回 ``minAreaRect`` 的旋转外接矩形，交给 ``is_planar_quad``
+     继续做平面性筛选。
 
   Args:
       cnt (NDArray): 输入轮廓点，通常来自 cv2.findContours
 
   Returns:
-      NDArray[np.float64] | None: 最大内接四边形顶点坐标，形状为 (4, 2)；
-        无法拟合时返回 None
+      NDArray[np.float64] | None: 近似四边形顶点坐标，形状为 (4, 2)；
+        轮廓退化时返回 None
   """
   peri = cv2.arcLength(cnt, True)
+  if peri <= 0:
+    return None
+
   for k in np.arange(0.01, 0.11, 0.005):
     approx = cv2.approxPolyDP(cnt, k * peri, True)
     if len(approx) == 4 and cv2.isContourConvex(approx):
       return approx.reshape(4, 2).astype(np.float64)
+
+  # 兜底一：粗近似 + 4 点子集枚举，取最大凸四边形
+  for k in np.arange(0.02, 0.16, 0.01):
+    points = cv2.approxPolyDP(cnt, k * peri, True).reshape(-1, 2)
+    if not 5 <= len(points) <= 12:
+      continue
+    best, best_area = None, 0.0
+    for combo in itertools.combinations(range(len(points)), 4):
+      cand = points[list(combo)].astype(np.float32)
+      if not cv2.isContourConvex(cand):
+        continue
+      area = abs(cv2.contourArea(cand))
+      if area > best_area:
+        best_area, best = area, cand.astype(np.float64)
+    if best is not None:
+      return best
+
+  # 兜底二：旋转外接矩形（可能带入少量非平坦像素，交给平面性校验过滤）
+  if len(cnt) >= 3:
+    return cv2.boxPoints(cv2.minAreaRect(cnt)).astype(np.float64)
   return None
 
+
 def _get_threhold_edge(img):
-  kernel = np.ones((3,3), np.uint8)
+  kernel = np.ones((3, 3), np.uint8)
   dilated = cv2.dilate(img, kernel, iterations=5)
   res = cv2.subtract(dilated, img)
   return res
-  
+
+
 def _is_acceptable(sub_quad, distortion_limit):
   """判断切出来的小四边形是否可接受（畸变是否在容忍范围内）"""
   # 计算四条边
@@ -123,11 +157,17 @@ def _get_mask(offset_img, offset=None):
 
 
 def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
-                 board_aspect=None, cell_jitter=0.18):
-  """按「目标板位面积」将四边形分割成多个四边形，通过面积 / 畸变过滤舍弃碎片。
+                 board_aspect=None, cell_jitter=0.18, area_scale=1.0):
+  """按「目标面积」将四边形分割成多个四边形，通过面积 / 畸变过滤舍弃碎片。
 
-  切分数量不单独指定：先按 ``area_range`` 采样一块板位的目标面积，
-  再用平坦区域总面积除以它得到格子数，所以板子要多大就切多少块。
+  切分数量不单独指定：先按 ``area_range`` 采样的目标面积确定格子数，
+  再用平坦区域总面积除以它得到行列数，所以板子要多大就切多少块。
+
+  **面积连续化**：行列数是整数，原始格子面积只能按 ``1/(cols*rows)`` 跳变
+  （例如 154k 的区域只能切出 154k / 38.5k …），只靠整数网格会出现「目标 80k
+  却只能拿到 38k」的量化误差，大区间永远落不到实处。这里给每块板单独算一个
+  向内收缩的间隙，把面积连续调到 ``area_range`` 内，因此调大 ``area_range``
+  时板位面积会真正跟着变大。
 
   板子看着像正方形，实际是长宽未知的矩形：每次调用会在畸变容忍度允许的
   比例范围内随机取一个长宽比，再据此解出行列数，不把格子切成等宽等高。
@@ -137,13 +177,17 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
     distortion (float | tuple): 畸变容忍度（0~1），越小要求越严格（丢弃越多的畸变块）；
         同时决定板位长宽比的允许范围（1.5 + 3.5*d）。
     normalize (float | tuple): 归一化程度（0~1），值越大内部网格越接近菱形分布。
-    area_range (tuple): 单个板位的面积范围（像素²），<1 的值按占平坦区域面积的比例解释；
-        同时决定切分数量（总面积 / 目标板位面积）。
-    gap (float): 切割间隙 (0~1，0为无缝)。
+    area_range (tuple): 单块板位的目标面积范围（像素²），<1 的值按占平坦区域面积的比例解释；
+        同时决定切分数量。
+    gap (float): 板位向内收缩的**最小**间隙 (0~1，0 为无缝)；实际间隙会在
+        ``gap``~0.45 之间逐块自适应，用来把格子面积调到目标区间。
     board_aspect (float | tuple | None): 板位长宽比（宽/高）；tuple 时在区间内随机取，
         None 时取畸变容忍度允许的整个范围。Defaults to None.
     cell_jitter (float): 切割线位置的抖动幅度（0~1）；>0 时同一区域里每块板的长宽都不同。
         Defaults to 0.18.
+    area_scale (float): ``area_range`` 与板位面积的换算系数。当 ``area_range`` 描述的是
+        「数字区域」面积时传 ``(1 - 2*BOARD_MARGIN)**2``，函数内部会把板位目标放大到
+        ``area_range / area_scale``，使数字内缩后的面积正好落回区间。默认 1（描述板位）。
   """
   # 1. 处理范围参数
   if isinstance(distortion, tuple):
@@ -160,49 +204,60 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
   avg_w = (width_top + width_bottom) / 2.0
   avg_h = (height_left + height_right) / 2.0
   quad_area = abs(cv2.contourArea(np.asarray(quad, dtype=np.float32)))
+  if quad_area <= 1.0:
+    return []
 
-  # 面积阈值只算一次：< 1 的值按「占平坦区域面积的比例」解释，>= 1 按像素面积
-  area_lo, area_hi = sorted(float(v) * quad_area if float(v) < 1 else float(v)
-                            for v in area_range)
+  # 3. 目标面积区间（<1 按比例解释；再换算到「板位」侧）
+  raw_lo, raw_hi = sorted(float(v) * quad_area if float(v) < 1 else float(v)
+                          for v in area_range)
+  scale = float(area_scale) if area_scale else 1.0
+  area_lo = max(raw_lo / scale, 1.0)
+  area_hi = max(raw_hi / scale, area_lo)
 
-  # 切分数量由板位面积决定：先采样目标板位面积（gap 收缩后的实际面积）
-  gap = max(0.0, min(0.9, gap))
-  shrink = (1.0 - gap) ** 2        # gap 向内收缩后格子剩下的相对面积
-  target_area = random.uniform(area_lo, area_hi)
-  target_num = max(1, int(round(quad_area * shrink / max(target_area, 1.0))))
+  gap_min = float(np.clip(gap, 0.0, 0.45))
+  gap_max = 0.45
+  # 收缩后面积 = 原始格子面积 * (1-gap)^2：原始格子至少要 >= area_lo（不收缩），
+  # 又要在 gap_max 下能收到 <= area_hi
+  pre_hi = area_hi / ((1.0 - gap_max) ** 2)
 
   # 板子看着接近正方形，实际长宽未知：在畸变容忍允许的范围内随机取一个长宽比
   max_ratio = 1.5 + distortion * 3.5        # 与 _is_acceptable 的上限保持一致
   if board_aspect is None:
     board_ratio = random.uniform(1.0 / max_ratio, max_ratio)
   elif isinstance(board_aspect, (tuple, list)):
-    board_ratio = random.uniform(float(board_aspect[0]), float(board_aspect[1]))
+    board_ratio = random.uniform(
+        float(board_aspect[0]), float(board_aspect[1]))
   else:
     board_ratio = float(board_aspect)
 
-  # 行列数要同时满足「格子宽高比接近 board_ratio」与「格子面积落在 area_range 内」：
+  # 行列数要同时满足「格子宽高比接近 board_ratio」与「格子原始面积能覆盖目标区间」：
   # 先按 sqrt 求理想列数，再枚举该列数附近可行的行数，最后按两个误差择优。
-  # （直接四舍五入会把板子切成细长条，细长条又会被畸变过滤丢掉）
   aspect_ratio = max(avg_w, 1e-6) / max(avg_h, 1e-6)
-  ideal_cols = max(1.0, math.sqrt(target_num * aspect_ratio / board_ratio))
+  target_ref = random.uniform(area_lo, min(area_hi, quad_area))
+  ideal_cols = max(1.0, math.sqrt(
+      max(quad_area, 1.0) / max(target_ref, 1.0) * aspect_ratio / board_ratio))
 
-  candidates = []          # (cols, rows, 收缩后格子面积, 格子宽高比)
+  candidates = []          # (cols, rows, 原始格子面积, 格子宽高比)
   for c in range(1, max(2, int(round(ideal_cols)) + 4)):
-    r_lo = max(1, int(math.ceil(quad_area * shrink / (c * area_hi))))
-    for r in range(r_lo, r_lo + 33):
-      cell_area = quad_area / (c * r) * shrink
-      if cell_area < area_lo:          # 行数继续增加只会更小，直接收工
-        break
+    r_max = max(1, int(math.floor(quad_area / (c * max(area_lo, 1.0)))))
+    for r in range(1, r_max + 1):
+      pre_area = quad_area / (c * r)
+      if pre_area < area_lo or pre_area > pre_hi:
+        continue
       cell_ratio = aspect_ratio * r / c
-      if 1.0 / max_ratio <= cell_ratio <= max_ratio:
-        candidates.append((c, r, cell_area, cell_ratio))
+      if not 1.0 / max_ratio <= cell_ratio <= max_ratio:
+        continue
+      candidates.append((c, r, pre_area, cell_ratio))
 
   if not candidates:        # 这块区域放不下既合面积、又合长宽比的板子
     return []
 
+  # 优先用「原始格子面积 >= 目标」的网格（能用收缩把面积连续调到目标，
+  # 不会被整数行列量化卡在某个固定档位）；都达不到时取最大的那一档
+  above = [cand for cand in candidates if cand[2] >= target_ref]
   cols, rows, _, _ = min(
-      candidates,
-      key=lambda cand: abs(math.log(cand[2] / target_area))
+      above or candidates,
+      key=lambda cand: abs(math.log(cand[2] / target_ref))
       + abs(math.log(cand[3] / board_ratio)))
 
   # 3. 生成内部网格点（切割线带抖动：同一区域里每块板的长宽都不完全相同）
@@ -242,7 +297,7 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
 
       grid_points[j, i] = p_base
 
-  # 4. 切片提取、过滤与 gap 处理
+  # 4. 切片提取、逐块采样目标面积并自适应 gap
   segments = []
   for j in range(rows):
     for i in range(cols):
@@ -252,16 +307,30 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
       p_bl = grid_points[j + 1, i]
 
       center = (p_tl + p_tr + p_br + p_bl) / 4.0
+      raw_quad = np.array([p_tl, p_tr, p_br, p_bl], dtype=np.float64)
+      pre_area = abs(cv2.contourArea(raw_quad.astype(np.float32)))
+      if pre_area < area_lo:      # 这一块本身已经小于下限，收缩后更不可能达标
+        continue
 
-      p_tl = p_tl + (center - p_tl) * gap
-      p_tr = p_tr + (center - p_tr) * gap
-      p_br = p_br + (center - p_br) * gap
-      p_bl = p_bl + (center - p_bl) * gap
+      # 每块板独立采样目标面积：把面积从「整数网格的离散档位」改成连续取值，
+      # 这样调大 area_range 才能真的得到更大的板位
+      target = random.uniform(area_lo, min(area_hi, pre_area))
+      g = 1.0 - math.sqrt(max(target, 1e-6) / pre_area)
+      if pre_area > area_hi:      # 原始格子超过上限，至少要缩到上限以内
+        g = max(g, 1.0 - math.sqrt(area_hi / pre_area))
+      g = float(np.clip(max(g, gap_min), 0.0, gap_max))
+
+      p_tl = p_tl + (center - p_tl) * g
+      p_tr = p_tr + (center - p_tr) * g
+      p_br = p_br + (center - p_br) * g
+      p_bl = p_bl + (center - p_bl) * g
 
       sub_quad = np.array([p_tl, p_tr, p_br, p_bl], dtype=np.float64)
       area = abs(cv2.contourArea(sub_quad.astype(np.float32)))
-      # 长宽比超过 distortion 允许的阈值、或面积不在范围内的碎片直接丢弃
-      if _is_acceptable(sub_quad, distortion) and area_lo <= area <= area_hi:
+      # 长宽比超过 distortion 允许的阈值、或面积不在范围内的碎片直接丢弃；
+      # 面积上下限留 2% 余量：抖动 / 透视会让实测面积与估算略有出入
+      if (_is_acceptable(sub_quad, distortion)
+              and area_lo * 0.98 <= area <= area_hi * 1.02):
         # 坐标必须保持 float64（绝对图像坐标），不能用 OffsetImg 承载
         segments.append(QuadSegment(sub_quad))
 
@@ -383,8 +452,8 @@ def get_flat_quad(img: NDArray[np.uint8], planar_check=True):
   """
   gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
   mask = _smooth_mask(gray)
-  cv2.imencode('.png', mask)[1].tofile(
-      f"{LOG_DIR}/{img.shape}_debug_0_mask.png")
+  # cv2.imencode('.png', mask)[1].tofile(
+  #    f"{LOG_DIR}/{img.shape}_debug_0_mask.png")
 
   contours, _ = cv2.findContours(
       mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -393,21 +462,21 @@ def get_flat_quad(img: NDArray[np.uint8], planar_check=True):
     return None
 
   _img = cv2.drawContours(img.copy(), contours, -1, (0, 255, 0), 2)
-  cv2.imencode('.png', _img)[1].tofile(
-      f"{LOG_DIR}/{img.shape}_debug_1_contours.png")
+  # cv2.imencode('.png', _img)[1].tofile(
+  #    f"{LOG_DIR}/{img.shape}_debug_1_contours.png")
 
   quads = [_get_maxquad(cnt) for cnt in contours]
   quads = [np.array(q, dtype=np.int32) for q in quads if q is not None]
   _img = cv2.drawContours(img.copy(), np.array(
       quads, dtype=np.int32), -1, (0, 255, 0), 2)
-  cv2.imencode('.png', _img)[1].tofile(
-      f"{LOG_DIR}/{img.shape}_debug_1_quads.png")
+  # cv2.imencode('.png', _img)[1].tofile(
+  #    f"{LOG_DIR}/{img.shape}_debug_1_quads.png")
 
   quads = [order_quad(q, False) for q in quads]
   _img = cv2.drawContours(img.copy(), np.array(
       quads, dtype=np.int32), -1, (0, 255, 0), 2)
-  cv2.imencode('.png', _img)[1].tofile(
-      f"{LOG_DIR}/{img.shape}_debug_2_contours.png")
+  # cv2.imencode('.png', _img)[1].tofile(
+  #    f"{LOG_DIR}/{img.shape}_debug_2_contours.png")
 
   if planar_check and quads:
     angles = _line_angles(gray)
@@ -419,8 +488,8 @@ def get_flat_quad(img: NDArray[np.uint8], planar_check=True):
     quads = ex_keep
     _img = cv2.drawContours(img.copy(), np.array(
         quads, dtype=np.int32), -1, (0, 255, 0), 2) if quads else img.copy()
-    cv2.imencode('.png', _img)[1].tofile(
-        f"{LOG_DIR}/{img.shape}_debug_3_planar.png")
+    # cv2.imencode('.png', _img)[1].tofile(
+    #    f"{LOG_DIR}/{img.shape}_debug_3_planar.png")
 
   return quads
 
@@ -981,7 +1050,8 @@ def fuse_scene(img_env, glyphs, segments,
   dquads = [np.asarray(q, dtype=np.float64).reshape(4, 2)
             for q in ([s.quad for s in segs] if digit_quads is None else digit_quads)]
   if len(dquads) != len(segs):
-    raise ValueError(f"digit_quads({len(dquads)}) 与 segments({len(segs)}) 数量不一致")
+    raise ValueError(
+        f"digit_quads({len(dquads)}) 与 segments({len(segs)}) 数量不一致")
 
   out = np.array(img_env, copy=True)
   depths = estimate_depths([s.quad for s in segs], out.shape)

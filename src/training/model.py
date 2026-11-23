@@ -20,14 +20,21 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class CenterNetDigit(nn.Module):
   """CenterNet-style digit heatmap, offset, and classification model."""
 
-  def __init__(self, num_classes: int = 10) -> None:
+  def __init__(self, num_classes: int = 10, dropout: float = 0.0) -> None:
     """Initialize the backbone and prediction heads.
 
     Args:
         num_classes (int): Number of digit classes predicted by the
             classification head.
+        dropout (float): 三个 head 里的 Dropout2d 丢弃概率（0 = 不加）。
+            全卷积网络没有 FC 层，所以用逐通道空间 dropout；
+            只在 >0 时插入模块，因此 0 时结构与旧权重完全一致。
+            训练时用 ``configs.training_cfg.DROPOUT``，推理 / 评估必须用同一个值。
     """
     super().__init__()
+    dropout = float(dropout)
+    if not 0.0 <= dropout < 1.0:
+      raise ValueError(f"dropout 应为 [0, 1) 内的概率，收到 {dropout}")
     r18 = torchvision.models.resnet18(weights="IMAGENET1K_V1")
     self.backbone = nn.Sequential(
         r18.conv1,  # (B, 192, 192, 64)
@@ -37,23 +44,30 @@ class CenterNetDigit(nn.Module):
         r18.layer1,  # (B, 48, 48, 64)
         r18.layer2,  # (B, 24, 24, 128)
     )
+    
+    def _head(out_ch: int, *, sigmoid: bool = False) -> nn.Sequential:
+      """Conv3x3 -> ReLU -> [Dropout2d] -> Conv1x1 [-> Sigmoid]"""
+      layers: list[nn.Module] = [
+          nn.Conv2d(128, 64, 3, padding=1),
+          nn.ReLU(inplace=True),
+      ]
+      if dropout > 0.0:
+        layers.append(nn.Dropout2d(dropout))
+      layers.append(nn.Conv2d(64, out_ch, 1))
+      if sigmoid:
+        layers.append(nn.Sigmoid())
+      return nn.Sequential(*layers)
 
     # 每格"是数字中心"的概率 out: (B,1,h,w)
-    self.hm_head = nn.Sequential(
-        nn.Conv2d(128, 64, 3, padding=1),
-        nn.ReLU(inplace=True),
-        nn.Conv2d(64, 1, 1), nn.Sigmoid())
+    self.hm_head = _head(1, sigmoid=True)
     # 中心到 4 点的偏移 (4点×x,y) out: (B,8,h,w)
-    self.reg_head = nn.Sequential(
-        nn.Conv2d(128, 64, 3, padding=1),
-        nn.ReLU(inplace=True),
-        nn.Conv2d(64, 8, 1))
+    self.reg_head =_head(8)
     # 每格 10 类 digits (B,10,h,w)
-    self.cls_head = nn.Sequential(
-        nn.Conv2d(128, 64, 3, padding=1),
-        nn.ReLU(inplace=True),
-        nn.Conv2d(64, num_classes, 1))
-
+    self.cls_head = _head(num_classes)
+    # 结构元信息：保存 checkpoint 时一并写出去，推理端可据此对齐结构
+    # （不是 Parameter/Buffer，不会进 state_dict）
+    self.num_classes = int(num_classes)
+    self.dropout_p = dropout
     # 不在这里自动 .to(device)：设备由调用方决定
     # （单元测试用 CPU，训练时写 model.to(device) 并把 batch 也搬到同一设备）。
     # 早期版本在这里搬过一次，结果是模型半 GPU 半 CPU，前向直接报
@@ -136,17 +150,22 @@ def build_target(
 
   for b in range(B):
     for quads, digits in zip(quads_list[b], digits_list[b]):
-      cx, cy = quads[:, 0].mean(), quads[:, 1].mean()  # 中心点
+      cx, cy = quads[:, 0].mean(), quads[:, 1].mean()  # 中心点（浮点，仅用于定位格子）
       # 出界处理（量化到格子上；亚像素部分交给 reg 头回归）
       ix = min(max(int(cx * fw), 0), fw - 1)
       iy = min(max(int(cy * fh), 0), fh - 1)
       # 只有正确位置才标记相应数据
       _draw_gaussian(hm[b], ix, iy, radius)
-      offset = (quads - torch.tensor([cx, cy])) * torch.tensor([fw, fh])
+      # offset 定义为「4 个角点 - 所在格子」的坐标差（单位：feature 格）。
+      # 必须相对格子而不是浮点中心：推理端只知道格子下标，
+      # 用 (格子 + off) / (fw, fh) 才能精确还原角点。
+      cell = torch.tensor([ix, iy], dtype=quads.dtype)
+      offset = quads * torch.tensor([fw, fh], dtype=quads.dtype) - cell
       reg[b, :, iy, ix] = offset.reshape(-1)
       cls[b, iy, ix] = int(digits)
       mask[b, iy, ix] = 1.0
   return hm, reg, cls, mask
+
 
 def focal_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
   """Calculate focal loss for the center heatmap.
@@ -167,6 +186,7 @@ def focal_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
   pos_loss = pos_loss.sum()
   neg_loss = neg_loss.sum()
   return (pos_loss.sum() + neg_loss.sum()) / pos.sum().clamp(min=1.0)
+
 
 def total_loss(
     hm_p: torch.Tensor,
