@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-
+import torch
 from src.training.model import CenterNetDigit
 from src.training.train import Trainer
 
@@ -50,3 +50,14 @@ def test_load_model_missing_checkpoint(tmp_path) -> None:
 
   with pytest.raises(FileNotFoundError, match="找不到 checkpoint"):
     trainer._load_model(model)
+    
+def test_single(tmp_path) -> None:
+  """只训练一次（空 dataloader：验证前向前的准备流程不报错）"""
+  model = CenterNetDigit(num_classes=10)
+  trainer = Trainer(epochs=1,
+                    device="cuda" if torch.cuda.is_available() else "cpu",
+                    ckpt_path=tmp_path / "ckpt.pt")
+  opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+  sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=1)
+  trainer.train(model, [], opt, sched, freeze_backbone=False)
+  assert all(_grad_flags(model.backbone))

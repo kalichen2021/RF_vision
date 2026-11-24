@@ -1,18 +1,40 @@
 import json
-import torch
-from torch.utils.data import Dataset
-import torchvision.transforms as T
+
+import cv2
+import numpy as np
 from pathlib import Path
+
+# ImageNet 归一化参数（ResNet18 预训练权重就是按这个统计出的）
+_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
+_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
 
 
 def collate_fn(batch):
-  imgs = torch.stack([b[0] for b in batch])
-  quads = [b[1] for b in batch]
-  digits = [b[2] for b in batch]
+  """把 numpy 样本拼成 batch 张量
+
+  torch 在这里才 import：DataLoader worker 会 pickle/反序列化本模块，
+  顶层不 import torch 能让 worker 少加载一堆东西（每个 worker 的常驻内存
+  直接决定 NUM_WORKERS 能开多大）。
+  """
+  import torch
+
+  imgs = torch.from_numpy(np.stack([b[0] for b in batch]))
+  quads = [torch.from_numpy(b[1]) for b in batch]
+  digits = [torch.from_numpy(b[2]) for b in batch]
   return imgs, quads, digits
 
 
-class DigitDataset(Dataset):
+class DigitDataset:
+  """读 ``labels.json`` + 灰度样本图，返回 ``(img[3,H,W], quad_norm[N,4,2], digit[N])``
+
+  读图 / 缩放用 cv2（灰度 PNG 直接解码，再 repeat 成 3 通道），比 PIL
+  ``convert("RGB") -> BICUBIC Resize`` 快 2~3 倍；单样本实测约 7ms。
+
+  **返回值是 numpy 而不是 torch 张量**：``collate_fn`` 里再转 torch。
+  这样 worker 进程不需要在本模块顶层加载 torch / torchvision，能显著降低
+  每个 worker 的常驻内存（曾因 NUM_WORKERS=10 时每 worker ≈1GB 把 16G 内存吃爆）。
+  """
+
   def __init__(self, json_path, img_dir, trainingset_ratio=1.0, img_size=(384, 384), convert="RGB", mode="training"):
     """_summary_
 
@@ -20,8 +42,8 @@ class DigitDataset(Dataset):
         json_path (Path):  json 路径
         img_dir (Path): 图片文件夹路径
         trainingset_ratio (float, optional): 取前百分之多少的样本作为训练集 (0~1]. Defaults to 1.0.
-        img_size (tuple, optional): 图片输入尺寸. Defaults to (384, 384).
-        convert (str, optional): 图片读取通道，应该为“RGB”三通道，因为r18模型的输入为三通道. Defaults to "RGB".
+        img_size (tuple, optional): 图片输入尺寸 (H, W). Defaults to (384, 384).
+        convert (str, optional): "RGB"（3 通道，ResNet18 输入）或 "L"（灰度单通道）. Defaults to "RGB".
         mode (str, optional): 数据集模式，可以是 "training" 或 "testing". Defaults to "training".
     """
     with open(json_path, 'r') as f:
@@ -36,38 +58,70 @@ class DigitDataset(Dataset):
     total = len(self.data["samples"])
     cut = max(1, int(total * ratio))
     if self.mode == "training":
-      self.samples = self.data["samples"][:cut]
+      raw = self.data["samples"][:cut]
     elif self.mode == "testing":
       # ratio=1.0 时 cut 等于总数，切片会是空的 -> 宁可报错也不要静默返回 0 条样本
       if cut >= total:
         raise ValueError(
             f"mode='testing' 但 trainingset_ratio={ratio} 把全部 {total} 条都划给了训练集，"
             "测试集为空；请传入与训练时一致的比例（如 0.8）")
-      self.samples = self.data["samples"][cut:]
+      raw = self.data["samples"][cut:]
     else:
       raise ValueError(f"mode 应为 'training' 或 'testing'，收到 {mode}")
+
+    # 只保留训练 / 推理真正用的字段：labels.json 里还有 board_quad / quad /
+    # center / depth / sigma 等，DataLoader 用 spawn 起 worker 时每个子进程
+    # 都要 pickle 一份数据集，字段越多内存越紧张（曾导致 worker MemoryError）
+    self.samples = [self._slim(s) for s in raw]
+    del self.data                 # 完整标签不再需要，尽早释放
     
     self.img_size = img_size
     self.convert = convert
-    self.tf = T.Compose([
-        T.Resize(self.img_size),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    # cv2.resize 的参数顺序是 (宽, 高)，这里统一存成 (h, w) 免得每张图都去猜
+    self._img_hw = (int(img_size[0]), int(img_size[1]))
+    self._channels = 3 if str(convert).upper() == "RGB" else 1
 
   def __len__(self):
     # 必须返回「实际可用样本数」：self.samples 已被 trainingset_ratio 截断，
     # 用 data["count"]（原始总数）会让 DataLoader 取到越界下标 -> IndexError
     return len(self.samples)
 
-  def __getitem__(self, idx):
-    from PIL import Image
-    s = self.samples[idx]
+  @staticmethod
+  def _slim(sample):
+    """只保留 image + objects 里的 digit / quad_norm"""
+    return {"image": sample["image"],
+            "objects": [{"digit": int(o["digit"]),
+                         "quad_norm": o["quad_norm"]}
+                        for o in sample.get("objects", [])]}
 
-    img = Image.open(self.img_dir / s["image"]).convert(self.convert)
-    img = self.tf(img)
-    quads = torch.tensor([o["quad_norm"]
-                         for o in s["objects"]], dtype=torch.float32)
-    digits = torch.tensor([o["digit"]
-                          for o in s["objects"]], dtype=torch.long)
+  def __getitem__(self, idx):
+    """读一张灰度样本 -> (归一化张量, quads[N,4,2], digits[N])
+
+    用 cv2 代替 PIL：样本是灰度 PNG，PIL 的 ``convert("RGB")`` 会先复制 3 份
+    再 BICUBIC 缩放；这里直接灰度解码 + ``INTER_LINEAR`` 缩放后再 repeat，
+    单样本耗时约为原来的 1/2~1/3（读图是 DataLoader 的主要 CPU 开销）。
+    """
+    s = self.samples[idx]
+    path = self.img_dir / s["image"]
+    # 用 imdecode 而不是 imread：避开 Windows 下中文路径读不出来的问题
+    buf = np.fromfile(path, dtype=np.uint8)
+    gray = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+      raise FileNotFoundError(f"图片读取失败: {path}")
+
+    h, w = self._img_hw
+    gray = cv2.resize(gray, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    img = gray.astype(np.float32) / 255.0
+    if self._channels == 3:
+      img = np.repeat(img[None], 3, axis=0)
+      mean, std = _MEAN, _STD
+    else:
+      img = img[None]
+      mean, std = _MEAN[:1], _STD[:1]
+    img = np.ascontiguousarray((img - mean) / std)
+
+    quads = np.asarray([o["quad_norm"] for o in s["objects"]],
+                       dtype=np.float32).reshape(-1, 4, 2)
+    digits = np.asarray([o["digit"] for o in s["objects"]], dtype=np.int64)
     return img, quads, digits

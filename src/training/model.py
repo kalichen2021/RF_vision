@@ -6,7 +6,10 @@ import os
 from collections.abc import Sequence
 
 os.environ["TORCH_HOME"] = 'D:/Dev-Lab/.TORCH_HOME'
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# 这里不要定义模块级 device：model.py 会被 DataLoader worker 通过 spawn import，
+# worker 里一旦初始化 CUDA，每个进程都会建一份 context（几百 MB），
+# 多个 worker 叠加就会把显存吃光，并以 “CUDA error: unknown error” 形式炸掉训练。
+# 设备统一由调用方（主进程）决定。
 
 
 

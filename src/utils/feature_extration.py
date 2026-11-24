@@ -157,7 +157,8 @@ def _get_mask(offset_img, offset=None):
 
 
 def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
-                 board_aspect=None, cell_jitter=0.18, area_scale=1.0):
+                 board_aspect=None, cell_jitter=0.18, area_scale=1.0,
+                 min_cells=1):
   """按「目标面积」将四边形分割成多个四边形，通过面积 / 畸变过滤舍弃碎片。
 
   切分数量不单独指定：先按 ``area_range`` 采样的目标面积确定格子数，
@@ -188,6 +189,8 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
     area_scale (float): ``area_range`` 与板位面积的换算系数。当 ``area_range`` 描述的是
         「数字区域」面积时传 ``(1 - 2*BOARD_MARGIN)**2``，函数内部会把板位目标放大到
         ``area_range / area_scale``，使数字内缩后的面积正好落回区间。默认 1（描述板位）。
+    min_cells (int): 期望至少切出的板位数。用于「每张图放 N 个数字」——多需要几块
+        就优先选更细的网格，而不是只切一块最大的板。默认 1。
   """
   # 1. 处理范围参数
   if isinstance(distortion, tuple):
@@ -233,7 +236,11 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
   # 行列数要同时满足「格子宽高比接近 board_ratio」与「格子原始面积能覆盖目标区间」：
   # 先按 sqrt 求理想列数，再枚举该列数附近可行的行数，最后按两个误差择优。
   aspect_ratio = max(avg_w, 1e-6) / max(avg_h, 1e-6)
+  min_cells = max(1, int(min_cells))
   target_ref = random.uniform(area_lo, min(area_hi, quad_area))
+  if min_cells > 1:
+    # 需要更多板位时，把目标格子面积压到「刚好能分出 min_cells 块」
+    target_ref = min(target_ref, quad_area / min_cells)
   ideal_cols = max(1.0, math.sqrt(
       max(quad_area, 1.0) / max(target_ref, 1.0) * aspect_ratio / board_ratio))
 
@@ -252,11 +259,14 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
   if not candidates:        # 这块区域放不下既合面积、又合长宽比的板子
     return []
 
+  # 需求块数优先：只在能切出 >= min_cells 块的网格里挑（实在做不到时退回全部）
+  fit = [cand for cand in candidates if cand[0] * cand[1] >= min_cells]
+  pool = fit or candidates
   # 优先用「原始格子面积 >= 目标」的网格（能用收缩把面积连续调到目标，
   # 不会被整数行列量化卡在某个固定档位）；都达不到时取最大的那一档
-  above = [cand for cand in candidates if cand[2] >= target_ref]
+  above = [cand for cand in pool if cand[2] >= target_ref]
   cols, rows, _, _ = min(
-      above or candidates,
+      above or pool,
       key=lambda cand: abs(math.log(cand[2] / target_ref))
       + abs(math.log(cand[3] / board_ratio)))
 
@@ -522,15 +532,18 @@ def pick_contrast(contrast=CONTRAST_RANGE) -> float:
   return float(np.clip(random.choice(vals), 0.0, 1.0))
 
 
-def contrast_gray(bg, contrast=0.5) -> int:
+def contrast_gray(bg, contrast=0.5, polarity="any") -> int:
   """按目标对比度给数字定色：使 |数字灰度 - 背景亮度| ≈ contrast * 255
 
-  优先朝有余量的方向取（暗背景提亮、亮背景压暗），一侧越界就改走另一侧，
+  ``polarity`` 控制方向：``"down"`` 只压暗（亮板/白纸 → 黑字）、
+  ``"up"`` 只提亮（暗板 → 白字）、``"any"`` 优先朝有余量的方向取
+  （暗背景提亮、亮背景压暗）。指定方向越界时自动回退到另一侧，
   两侧都越界时取 0 / 255（此时实际对比度会被截断）。
 
   Args:
       bg (float): 贴图落点处的背景亮度 0~255
       contrast (float): 目标对比度 0~1
+      polarity (str): ``"any"`` / ``"down"`` / ``"up"``
 
   Returns:
       int: 数字灰度 0~255
@@ -539,6 +552,10 @@ def contrast_gray(bg, contrast=0.5) -> int:
   c = float(np.clip(contrast, 0.0, 1.0)) * 255.0
   up, down = bg + c, bg - c
   up_ok, down_ok = up <= 255.0, down >= 0.0
+  if polarity == "down" and down_ok:
+    return int(round(down))          # 只压暗：白板黑字
+  if polarity == "up" and up_ok:
+    return int(round(up))            # 只提亮：黑板白字
   if up_ok and down_ok:
     return int(round(up if bg < 127.0 else down))
   if up_ok:
@@ -817,7 +834,7 @@ def _defocus_mask(mask, quad, sigma, spread=0.5, base=0.0) -> NDArray[np.float32
 def draw_board(img_env, quad, tone_delta=18.0, feather=2.0,
                shadow=True, shadow_offset=(4, 6),
                shadow_blur=9.0, shadow_alpha=0.35,
-               sigma=0.0, persp_spread=0.5):
+               sigma=0.0, persp_spread=0.5, target_gray=None):
   """在环境图上渲染一块「板」：整体调色 + 失焦柔边 + 软投影
 
   数字就贴在这块板上。板面和数字使用同一套失焦：``sigma`` 越大，
@@ -827,7 +844,8 @@ def draw_board(img_env, quad, tone_delta=18.0, feather=2.0,
   Args:
       img_env (NDArray[np.uint8]): 环境图（BGR 或灰度）
       quad (NDArray[np.float64]): 板面四边形，(4, 2)
-      tone_delta (float | tuple | Sequence): 板面与背景的亮度差（正 = 更亮）
+      tone_delta (float | tuple | Sequence): 板面与背景的亮度差（正 = 更亮）；
+          仅在 ``target_gray`` 为 None 时生效
       feather (float): 基础边缘柔化 sigma（像素）
       shadow (bool): 是否画软投影
       shadow_offset (tuple[float, float]): 投影相对板面的偏移
@@ -835,6 +853,9 @@ def draw_board(img_env, quad, tone_delta=18.0, feather=2.0,
       shadow_alpha (float): 投影不透明度
       sigma (float): 失焦量（与数字使用同一个值），0 表示只做基础柔边
       persp_spread (float): 板内「近端 → 远端」的失焦差异比例
+      target_gray (float | tuple | Sequence | None): 板面的**绝对**目标灰度；
+          给定时忽略 ``tone_delta``（相对背景的偏移）。暗环境里也能画出
+          真正的「白纸/白板」，是稳定得到「白纸黑字」的关键
 
   Returns:
       NDArray[np.uint8]: 画好板的新图（不修改入参）
@@ -860,7 +881,11 @@ def draw_board(img_env, quad, tone_delta=18.0, feather=2.0,
     out = np.clip(out.astype(np.float32) * (1.0 - sa), 0, 255).astype(np.uint8)
 
   bg = float(np.median(out[mask > 127]))
-  target = float(np.clip(bg + _pick_tone(tone_delta), 0, 255))
+  if target_gray is None:
+    target = float(np.clip(bg + _pick_tone(tone_delta), 0, 255))
+  else:
+    # 绝对目标灰度：不依赖背景亮度，暗场景也能出「白板」
+    target = float(np.clip(_pick_tone(target_gray), 0, 255))
   a = _defocus_mask(mask, quad, sigma, persp_spread, base=feather)
   if out.ndim == 3:
     a = a[..., None]
@@ -1010,7 +1035,9 @@ def fuse_scene(img_env, glyphs, segments,
                persp_spread=0.5,
                digit_quads=None, board_tone=None,
                board_shadow=True, board_feather=2.0,
-               size_ratio=0.0):
+               size_ratio=0.0,
+               board_gray=None, board_gray_flip=None,
+               polarity_flip_rate=0.0, min_visible=0.0):
   """把一批数字贴图融合进环境图，并按基准平面做景深失焦
 
   完整流程：先给每块四边形画上一块“板” → 估计各块板的深度 → 确定基准平面
@@ -1035,6 +1062,13 @@ def fuse_scene(img_env, glyphs, segments,
       board_feather (float): 板边柔化 sigma
       size_ratio (float): 失焦上限 = ``size_ratio * min(数字贴图宽, 高)``，
         用于保证远处的小数字仍可辨认；0 表示不限
+      board_gray (float | tuple | Sequence | None): 板面的**绝对**目标灰度区间；
+        给定时不再用 ``board_tone``（相对背景），暗环境里也能画出「白纸/白板」
+      board_gray_flip (float | tuple | Sequence | None): 反极性样本的板面灰度
+        （深色板）；None 表示反极性时仍用 ``board_gray``
+      polarity_flip_rate (float): 反极性（深板 + 亮字）样本比例，0 = 全部白纸黑字
+      min_visible (float): 融合后的最小可见对比度 ``|数字-背景|*alpha/255``；
+        低于该值时拉满 alpha 并提高对比度，避免「看不见但仍有标签」的噪声样本
 
   Raises:
       ValueError: glyphs / segments / digit_quads 数量不一致
@@ -1067,10 +1101,23 @@ def fuse_scene(img_env, glyphs, segments,
     sigmas = [min(s, float(size_ratio) * float(min(g.shape[:2])))
               for s, g in zip(sigmas, gs)]
 
+  # 极性：board_gray 给定时默认「浅板 + 深字」（白纸黑字），
+  # 再按 polarity_flip_rate 混入少量反极性样本（深板 + 亮字）
+  if board_gray is None:
+    polarity = "any"                       # 旧行为：由背景亮度决定
+    tone_range = None
+  else:
+    flip = bool(polarity_flip_rate) and random.random() < float(polarity_flip_rate)
+    polarity = "up" if flip else "down"
+    tone_range = board_gray_flip if (flip and board_gray_flip is not None) \
+        else board_gray
+
   # 先把板画上（板面和数字用同一个 sigma 失焦），数字才是“写在板上”的
-  if board_tone is not None:
+  if board_tone is not None or tone_range is not None:
     for seg, sg in zip(segs, sigmas):
       out = draw_board(out, seg.quad, tone_delta=board_tone,
+                       target_gray=None if tone_range is None
+                       else _pick_tone(tone_range),
                        feather=board_feather, shadow=board_shadow,
                        sigma=sg, persp_spread=persp_spread)
 
@@ -1084,8 +1131,13 @@ def fuse_scene(img_env, glyphs, segments,
     offset = (float(dquad[:, 0].min()), float(dquad[:, 1].min()))
     contrast_v = pick_contrast(contrast)
     bg = local_background(out, layer, offset)
-    gray_v = contrast_gray(bg, contrast_v)
+    gray_v = contrast_gray(bg, contrast_v, polarity=polarity)
     alpha_v = pick_alpha(alpha)
+    # 可见性保底：低对比 × 低透明度再叠加失焦，会产出“几乎看不见但仍有标签”
+    # 的噪声样本（直接抬高 heatmap / offset 的 loss 地板）；太淡就拉满透明度
+    if min_visible > 0 and abs(gray_v - bg) * alpha_v < float(min_visible) * 255.0:
+      alpha_v = 1.0
+      gray_v = contrast_gray(bg, max(float(contrast_v), 0.5), polarity=polarity)
 
     out = fuse_img(out, layer, offset, gray=gray_v, alpha=alpha_v)
     infos.append({

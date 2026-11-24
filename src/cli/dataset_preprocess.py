@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from configs import path as pathcfg
 from configs import preprocess_cfg as ppcfg
+from configs.preprocess_cfg import THICKNESS_CHOICES, CANVAS_CHOICES, FONT_VARIANTS
 from configs.log import UUID as _uuid
 from src.preprocess import Preprocess
 from src.preprocess.process import build_record, save_dataset, save_sample
@@ -41,10 +42,10 @@ from src.utils.debug_tools import read_image
 from src.utils.font_processor import font2img, get_available_fonts, get_font_path
 
 # 笔画粗细 / 画布尺寸的候选，用来增加字形多样性
-THICKNESS_CHOICES = (-1, 0, 0, 1, 1, 2)
-CANVAS_CHOICES = (48, 64, 64, 80)
+# THICKNESS_CHOICES = (-1, 0, 0, 1, 1, 2)
+# CANVAS_CHOICES = (48, 64, 64, 80)
 # 每个数字渲染几个字形变体（不同字体 / 字重 / 画布）
-FONT_VARIANTS = 2
+# FONT_VARIANTS = 2
 
 
 def build_pp() -> Preprocess:
@@ -93,12 +94,31 @@ def make_font_imgs(count=None, fonts=None, variants=FONT_VARIANTS):
   return glyphs, digit_ids
 
 
-def iter_env_paths(env_paths):
-  """无限轮转环境图：每轮先洗牌，让相邻样本的底图尽量不同"""
-  while True:
-    batch = list(env_paths)
-    random.shuffle(batch)
-    yield from batch
+def pick_env_path(env_paths, usage, failures,
+                  cap=ppcfg.ENV_USE_SOFT_CAP, decay=ppcfg.ENV_USE_DECAY):
+  """按使用次数加权随机选一张环境图
+
+  成功使用次数未达 ``cap`` 时权重为 1；达到后每多用一次权重乘以 ``decay``，
+  让高频图渐渐降温。读取 / 切分失败的图额外乘 ``0.25^失败次数``，避免坏图被
+  反复抽到。
+
+  Args:
+      env_paths (list[Path]): 候选环境图
+      usage (dict[Path, int]): 已成功使用的次数
+      failures (dict[Path, int]): 连续失败次数
+      cap (int): 开始降温的使用次数阈值
+      decay (float): 超阈值后的权重衰减系数
+
+  Returns:
+      Path: 选中的环境图
+  """
+  weights = []
+  for path in env_paths:
+    used = usage.get(path, 0)
+    weight = 1.0 if used < cap else decay ** (used - cap + 1)
+    weight *= 0.25 ** failures.get(path, 0)
+    weights.append(max(weight, 1e-3))
+  return random.choices(env_paths, weights=weights, k=1)[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -133,7 +153,10 @@ def main(argv: list[str] | None = None) -> int:
   quads_cache: dict[Path, list] = {}
   records: list[dict] = []
   skipped = 0
-  dead_round = 0            # 连续失败次数，攒满一轮说明环境图全不可用
+  usage = {p: 0 for p in env_paths}     # 每张图成功使用次数（用于降权）
+  failures = {p: 0 for p in env_paths}  # 每张图失败次数（用于避开坏图）
+  attempts = 0
+  max_attempts = max(total * 20, len(env_paths) * 50)
   started = time.perf_counter()
 
   columns = (SpinnerColumn(), TextColumn("[bold cyan]{task.description}"),
@@ -142,19 +165,15 @@ def main(argv: list[str] | None = None) -> int:
   with Progress(*columns, console=console) as progress:
     task = progress.add_task("生成样本", total=total, note="")
 
-    for path in iter_env_paths(env_paths):
-      if len(records) >= total:
-        break
-      if dead_round >= len(env_paths):
-        console.print("[bold red]整轮环境图都切不出板位，提前结束[/]"
-                      "（可调小 AREA_RANGE 或检查环境图）")
-        break
+    while len(records) < total and attempts < max_attempts:
+      attempts += 1
+      path = pick_env_path(env_paths, usage, failures)
 
       try:
         env_img = read_image(path)
       except ValueError as exc:      # 坏图只跳过，不中断整批
         skipped += 1
-        dead_round += 1
+        failures[path] = failures.get(path, 0) + 1
         progress.update(task, note=f"[red]读取失败[/] {path.name}")
         console.print(f"[red]{exc}[/]")
         continue
@@ -170,12 +189,13 @@ def main(argv: list[str] | None = None) -> int:
 
       if fused is None:
         skipped += 1
-        dead_round += 1
+        failures[path] = failures.get(path, 0) + 1
         progress.update(task, note=f"[yellow]跳过[/] {path.name} "
                                    f"无可用板位（累计 {skipped} 次）")
         continue
 
-      dead_round = 0
+      usage[path] = usage.get(path, 0) + 1
+      failures[path] = 0
       name = f"{len(records):05d}_{path.stem}"
       extra = {"source": path.name,
                "digit_count": len(labels),
@@ -196,7 +216,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"[bold]跳过[/]  {skipped} 次    "
                 f"[bold]耗时[/]  {elapsed:.1f} s")
   if len(records) < total:
-    console.print(f"[yellow]只生成 {len(records)}/{total} 张[/]")
+    console.print(f"[yellow]只生成 {len(records)}/{total} 张[/]"
+                  f"（尝试 {attempts} 次，跳过 {skipped} 次）")
+    console.print("[yellow]提示：数字个数范围 / 面积区间可能超出环境图的承载能力，"
+                  "可调小 SAMPLE_DIGIT_RANGE 或 AREA_RANGE[/]")
 
   return 0 if records else 1
 

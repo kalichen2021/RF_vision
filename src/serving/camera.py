@@ -7,7 +7,7 @@
 
     inf = Inferer(CenterNetDigit(num_classes=10, dropout=DROPOUT), SELECT_MODEL)
     with CameraDetector(inf, index=0, thr=0.3) as cam:
-        cam.run()        # 按 q / ESC 退出，按 s 存当前帧
+        cam.run()        # 按 q / ESC 退出，按 s 存当前帧，按 r / e 旋转画面
 
 命令行入口见 ``src/cli/realtime_infer.py``。
 """
@@ -21,12 +21,20 @@ import cv2
 import numpy as np
 import torch
 
+from configs import realtime_cfg as rtcfg
 from src.utils.debug_tools import draw_quads, save_image
 
 # 与 DigitDataset / build_transform 一致的 ImageNet 归一化（这里直接对 BGR 帧做，
 # 省掉一次 PIL 转换，实时性更好）
 _MEAN = np.array([0.485, 0.456, 0.406], np.float32) * 255.0
 _STD = np.array([0.229, 0.224, 0.225], np.float32) * 255.0
+
+# realtime_cfg.RESIZE_INTERP（字符串）→ cv2 插值常量
+_INTERP = {
+    "area": cv2.INTER_AREA,
+    "linear": cv2.INTER_LINEAR,
+    "cubic": cv2.INTER_CUBIC,
+}
 
 
 class CameraDetector:
@@ -46,13 +54,17 @@ class CameraDetector:
       save_dir (Path | None): 按 ``s`` 时的快照目录，None 表示不快照
       thickness (int): 框线宽
       font_scale (float): 标签字号
+      rotate (int): 初始顺时针旋转角度（0/90/180/270），显示与推理共用
+      input_mode (str | None): 送进模型的通道模式，``"gray"``（灰度复制成 3 通道）
+          或 ``"rgb"``（保留彩色）；None 时取 ``configs.realtime_cfg.INPUT_MODE``
       capture: 自定义 VideoCapture（测试注入用），None 时按 ``index`` 打开
   """
 
   def __init__(self, inferrer, index=0, img_size=(384, 384), width=1280,
                height=720, thr=0.3, topk=30, show=True,
                window_name="digits_tracker", max_fps=None, save_dir=None,
-               thickness=2, font_scale=0.55, capture=None):
+               thickness=2, font_scale=0.55, rotate=0, input_mode=None,
+               capture=None):
     self.inferrer = inferrer
     self.img_size = tuple(img_size)
     self.thr = float(thr)
@@ -63,6 +75,10 @@ class CameraDetector:
     self.save_dir = Path(save_dir) if save_dir else None
     self.thickness = int(thickness)
     self.font_scale = float(font_scale)
+    self.rotate = self.normalize_rotate(rotate)
+    # 送进模型的通道模式：gray = 灰度复制 3 通道（同训练样本），rgb = 保留彩色
+    self.input_mode = str(
+        rtcfg.INPUT_MODE if input_mode is None else input_mode).lower()
 
     self.cap = capture if capture is not None else self._open(index, width, height)
     self.frames = 0                 # 已处理帧数
@@ -105,23 +121,70 @@ class CameraDetector:
     self.close()
     return False
 
+  # ---------------- 旋转 ----------------
+  @staticmethod
+  def normalize_rotate(angle) -> int:
+    """把任意角度归一化到 0/90/180/270（顺时针）"""
+    angle = int(angle) % 360
+    if angle % 90:
+      raise ValueError(f"旋转角度必须是 90 的倍数，收到 {angle}")
+    return angle
+
+  def set_rotate(self, angle) -> int:
+    """设置顺时针旋转角度并返回生效值（0/90/180/270）"""
+    self.rotate = self.normalize_rotate(angle)
+    return self.rotate
+
+  def rotate_frame(self, frame):
+    """按 ``self.rotate`` 顺时针旋转 BGR 帧；0° 时原样返回
+
+    显示与推理都必须经过这里，保证「看到的就是模型读到的」。
+    """
+    if self.rotate == 90:
+      return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    if self.rotate == 180:
+      return cv2.rotate(frame, cv2.ROTATE_180)
+    if self.rotate == 270:
+      return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return frame
+
   # ---------------- 单帧处理 ----------------
   def frame2tensor(self, frame) -> torch.Tensor:
     """BGR 帧 → ``(1, 3, H, W)`` 归一化张量（与训练预处理一致）
+
+    通道模式由 ``self.input_mode``（默认取 ``configs.realtime_cfg.INPUT_MODE``）决定：
+    ``"gray"`` 先转灰度再复制成 3 通道（与灰度训练样本一致）；
+    ``"rgb"`` 保留摄像头原始颜色。两种模式输出都是 3 通道。
 
     Args:
         frame (np.ndarray): ``cv2.VideoCapture.read`` 拿到的 BGR 帧
 
     Returns:
         torch.Tensor: ``(1, 3, H, W)`` float32
+
+    Raises:
+        ValueError: ``input_mode`` 不是 ``"gray"`` / ``"rgb"``
     """
-    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, self.img_size, interpolation=cv2.INTER_AREA)
+    mode = self.input_mode
+    if mode == "gray":
+      gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+      img = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+    elif mode == "rgb":
+      img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    else:
+      raise ValueError(
+          f"input_mode 应为 'gray' 或 'rgb'，收到 {self.input_mode!r}")
+
+    # cv2.resize 的参数顺序是 (宽, 高)，而 self.img_size 存的是 (高, 宽)；
+    # 默认是正方形所以看不出来，非正方形时不转置就会把画面拉错方向
+    interp = _INTERP.get(str(rtcfg.RESIZE_INTERP).lower(), cv2.INTER_AREA)
+    img = cv2.resize(img, (self.img_size[1], self.img_size[0]),
+                     interpolation=interp)
     arr = (img.astype(np.float32) - _MEAN) / _STD
     return torch.from_numpy(arr.transpose(2, 0, 1)).contiguous().unsqueeze(0)
 
   def detect(self, frame):
-    """单帧推理 + 解码
+    """单帧推理 + 解码（传进来的帧需已按 ``self.rotate`` 旋转过）
 
     Returns:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ``(pts_norm(K,4,2),
@@ -143,6 +206,9 @@ class CameraDetector:
 
     退出条件：按 ``q`` / ``ESC``、摄像头断流、或达到 ``max_frames``。
 
+    快捷键：``s`` 快照、``r`` 顺时针转 90°、``e`` 逆时针转 90°
+    （旋转同时作用于显示画面和送进模型的图像）。
+
     Args:
         max_frames (int | None): 处理多少帧后退出，None 表示一直跑
     """
@@ -160,21 +226,31 @@ class CameraDetector:
         break
 
       self._update_fps()
+      # 先旋转再推理：显示与模型输入是同一张图
+      frame = self.rotate_frame(frame)
       result = self.detect(frame)
       vis = self.draw(frame, result)
       self.last_frame = vis
       self.frames += 1
 
       if self.show:
-        cv2.putText(vis, f"{self._fps:5.1f} FPS   n={len(result[0])}",
+        cv2.putText(vis, f"{self._fps:5.1f} FPS   n={len(result[0])}"
+                    f"   rot={self.rotate}",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                     (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(vis, "r/e: rotate  s: save  q: quit", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1,
+                    cv2.LINE_AA)
         cv2.imshow(self.window_name, vis)
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
           break
         if key == ord("s"):
           self.snapshot()
+        elif key == ord("r"):
+          self.set_rotate((self.rotate + 90) % 360)
+        elif key == ord("e"):
+          self.set_rotate((self.rotate - 90) % 360)
 
       if max_frames is not None and self.frames >= int(max_frames):
         break

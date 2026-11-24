@@ -108,13 +108,27 @@ class Preprocess:
                base_depth=None, plane_tol=ppcfg.PLANE_TOL,
                board_tone=ppcfg.BOARD_TONE, board_margin=ppcfg.BOARD_MARGIN,
                board_shadow=ppcfg.BOARD_SHADOW,
-               defocus_size_ratio=ppcfg.DEFOCUS_SIZE_RATIO):
+               defocus_size_ratio=ppcfg.DEFOCUS_SIZE_RATIO,
+               digit_count_range=ppcfg.SAMPLE_DIGIT_RANGE,
+               board_gray=ppcfg.BOARD_GRAY,
+               board_gray_flip=ppcfg.BOARD_GRAY_FLIP,
+               polarity_flip_rate=ppcfg.POLARITY_FLIP_RATE,
+               min_visible_contrast=ppcfg.MIN_VISIBLE_CONTRAST):
     self.config = {
         "distortion": distortion,
         "normalize": normalize,
         "area_range": area_range
     }
     self.quads_select_rate = quads_select_rate
+    # 每张样本的数字个数范围（含两端）；None 表示用 quads_select_rate 的旧逻辑
+    if digit_count_range is None:
+      self.digit_count_range = None
+    elif isinstance(digit_count_range, (int, float)):
+      self.digit_count_range = (int(digit_count_range),
+                                int(digit_count_range))
+    else:
+      lo, hi = sorted(int(v) for v in digit_count_range)
+      self.digit_count_range = (max(1, lo), max(1, hi))
     # 数字融合 / 景深失焦 配置
     self.contrast_range = contrast_range
     self.fuse_alpha = fuse_alpha
@@ -128,6 +142,11 @@ class Preprocess:
     self.board_margin = board_margin
     self.board_shadow = board_shadow
     self.defocus_size_ratio = defocus_size_ratio
+    # 板面 / 极性：默认以「白纸黑字」为主（BOARD_GRAY 是绝对灰度，不受环境亮度影响）
+    self.board_gray = board_gray
+    self.board_gray_flip = board_gray_flip
+    self.polarity_flip_rate = float(polarity_flip_rate)
+    self.min_visible_contrast = float(min_visible_contrast)
     # AREA_RANGE 描述的是「数字四边形」面积；板位要比它大 (1-2*margin)^-2 倍，
     # 这样 inset_quad 内缩之后，数字面积正好落在 AREA_RANGE 里
     self.area_scale = (1.0 - 2.0 * float(board_margin)) ** 2
@@ -144,6 +163,59 @@ class Preprocess:
     gray = env_img if env_img.ndim == 2 else cv2.cvtColor(
         env_img, cv2.COLOR_BGR2GRAY)
     return get_flat_quad(gray)
+
+  def _quad_capacity(self, quads):
+    """估算各平坦区域最多能放几块板（按最小板位面积）
+
+    Returns:
+        list[tuple[int, NDArray]]: ``(容量, 四边形)``，按容量从大到小排序
+    """
+    raw_lo = float(min(self.config["area_range"]))
+    capacity = []
+    for q in quads:
+      quad_area = abs(cv2.contourArea(np.asarray(q, dtype=np.float32)))
+      board_lo = (raw_lo * quad_area if raw_lo < 1 else raw_lo) \
+          / self.area_scale
+      # 最小 gap(0.12) 会再吃掉约 23% 面积，再留 10% 给切割线抖动
+      footprint = max(board_lo, 1.0) / ((1 - 0.12) ** 2)
+      cap = int(quad_area // max(footprint * 1.1, 1.0))
+      if cap > 0:
+        capacity.append((cap, q))
+    capacity.sort(key=lambda item: item[0], reverse=True)
+    return capacity
+
+  def _build_segments(self, quads, target_count, capacity=None):
+    """按「这张图要放 target_count 个数字」分配板位
+
+    每个平坦区域的容量 ≈ 区域面积 / 单块最小板位面积。按容量从大到小分配
+    名额，再让 ``segment_quad(min_cells=...)`` 切出足够多的板，避免“只想切
+    一块大板”导致数字个数总是偏少。
+
+    Returns:
+        list[QuadSegment]: 切出的板位（数量可能多于或少于 target_count）
+    """
+    if capacity is None:
+      capacity = self._quad_capacity(quads)
+
+    segments = []
+    for cap, q in capacity:
+      remaining = int(target_count) - len(segments)
+      if remaining <= 0:
+        break
+      want = min(cap, remaining)
+      # 切分带随机性（长宽比 / 网格 / gap），同一块区域多抽几次数出最多的一次，
+      # 避免一次抽到偏粗的网格导致「只要 6 块却只切出 3 块」
+      best: list = []
+      for _ in range(3 if want > 1 else 1):
+        got = segment_quad(q, **self.config, area_scale=self.area_scale,
+                           min_cells=want)
+        if len(got) > len(best):
+          best = got
+        if len(best) >= want:
+          break
+      if best:
+        segments.extend(best)
+    return segments
 
   def process(self, _font_imgs, env_img, show_cnt=False, quads=None,
               digit_ids=None):
@@ -184,18 +256,37 @@ class Preprocess:
       print("未检测到符合条件的平面区域")
       return None, []
 
-    segments = [s for q in quads
-                for s in segment_quad(q, **self.config,
-                                      area_scale=self.area_scale)]
-    if not segments:
-      print("分割后没有符合 distortion/area 条件的四边形")
-      return None, []
+    if self.digit_count_range is None:
+      # 旧逻辑：按面积切出全部板位，再按比例挑一部分
+      segments = [s for q in quads
+                  for s in segment_quad(q, **self.config,
+                                        area_scale=self.area_scale)]
+      if not segments:
+        print("分割后没有符合 distortion/area 条件的四边形")
+        return None, []
+      boxed_text_count = min(len(segments), int(
+          len(segments) * self.quads_select_rate + 1))
+      segments = random_choose(segments, boxed_text_count)
+    else:
+      # 新逻辑：先按容量算这张图最多能放几个，再在可行区间内取目标个数
+      k_lo, k_hi = self.digit_count_range
+      capacity = self._quad_capacity(quads)
+      max_count = sum(cap for cap, _ in capacity)
+      if max_count < k_lo:
+        print(f"板位不足：需要 {k_lo}~{k_hi} 个数字，容量只有 {max_count} 块")
+        return None, []
+      target_count = random.randint(k_lo, min(k_hi, max_count))
+      segments = self._build_segments(quads, target_count, capacity)
+      if len(segments) < k_lo:
+        # 高目标放不下时，至少保证能满足区间下限（再不行就换图重试）
+        segments = self._build_segments(quads, k_lo, capacity)
+      if len(segments) < k_lo:
+        print(f"板位不足：需要 {k_lo}~{k_hi} 个数字，只能切出 {len(segments)} 块")
+        return None, []
+      segments = random_choose(segments, min(target_count, len(segments)))
 
-    # 随机选择若干个板位；数字也从贴图池里随机取（类别由 digit_ids 给出）
-    boxed_text_count = min(len(segments), int(
-        len(segments) * self.quads_select_rate + 1))
-    seg_idx = random_choose(list(range(len(segments))), boxed_text_count)
-    segments = [segments[i] for i in seg_idx]
+    # 数字也从贴图池里随机取（类别由 digit_ids 给出）
+    boxed_text_count = len(segments)
     font_idx = random_choose(list(range(len(_font_imgs))), boxed_text_count)
     font_imgs = [_font_imgs[i] for i in font_idx]
 
@@ -216,6 +307,10 @@ class Preprocess:
         persp_spread=self.persp_spread,
         digit_quads=digit_quads,
         board_tone=self.board_tone,
+        board_gray=self.board_gray,
+        board_gray_flip=self.board_gray_flip,
+        polarity_flip_rate=self.polarity_flip_rate,
+        min_visible=self.min_visible_contrast,
         board_shadow=self.board_shadow,
         size_ratio=self.defocus_size_ratio)
 

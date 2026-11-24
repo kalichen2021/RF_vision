@@ -8,7 +8,8 @@
     python src/cli/realtime_infer.py --no-show -n 100   # 不弹窗，跑 100 帧（无显示器环境）
     python src/cli/realtime_infer.py --save             # 按 s 把画面存到 dataset/log/camera/<uuid>
 
-按键：``q`` / ``ESC`` 退出，``s`` 保存当前帧快照。
+按键：``q`` / ``ESC`` 退出，``s`` 保存当前帧快照，``r`` / ``e`` 顺时针 / 逆时针旋转 90°
+（旋转同时作用于显示画面和送进模型的图像）。
 """
 
 import argparse
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from configs import camera_cfg as ccfg
 from configs import path as pathcfg
+from configs import realtime_cfg as rtcfg
 from configs.log import UUID as _uuid
 from configs.path import SELECT_MODEL
 from configs.training_cfg import DROPOUT
@@ -47,7 +49,9 @@ def build_detector(args) -> CameraDetector:
       max_fps=args.max_fps,
       save_dir=save_dir,
       thickness=ccfg.DRAW_THICKNESS,
-      font_scale=ccfg.FONT_SCALE)
+      font_scale=ccfg.FONT_SCALE,
+      rotate=args.rotate,
+      input_mode=args.input_mode)
 
 
 def main(argv=None) -> int:
@@ -65,6 +69,11 @@ def main(argv=None) -> int:
   parser.add_argument("--save", action="store_true",
                       help="开启快照：按 s 存到 dataset/log/camera/<uuid>")
   parser.add_argument("--device", default=None, help="cuda / cpu，缺省自动选择")
+  parser.add_argument("--rotate", type=int, default=ccfg.ROTATE, choices=(0, 90, 180, 270),
+                      help="初始顺时针旋转角度（运行中按 r/e 调整），显示与推理共用")
+  parser.add_argument("--input-mode", default=rtcfg.INPUT_MODE,
+                      choices=("gray", "rgb"),
+                      help="送进模型的通道模式：gray=灰度（同训练样本，默认） / rgb=彩色")
   args = parser.parse_args(argv)
 
   detector = build_detector(args)
