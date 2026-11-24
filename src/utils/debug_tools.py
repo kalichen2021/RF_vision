@@ -1,9 +1,14 @@
-import cv2,numpy as np
+import cv2
+import numpy as np
 from pathlib import Path
+from typing import Any, Callable, Sequence
 from functools import wraps 
 
+# debug_tools 会被 DataLoader worker 以外的绘图场景使用，
+# 这里不 import torch（torch.Tensor 只作为 duck-typing 参数，标注为 Any）。
 
-def cv_show(img, title='image'):
+
+def cv_show(img: np.ndarray, title: str = "image") -> None:
   if img is None:
       raise ValueError(f"cv_show 收到 None, 无法显示: {title}")
   cv2.imshow(title, img)
@@ -11,7 +16,7 @@ def cv_show(img, title='image'):
   cv2.destroyAllWindows()
   
   
-def read_image(img_path: Path):
+def read_image(img_path: Path | str) -> np.ndarray:
   data = np.fromfile(str(img_path), dtype=np.uint8)
   img = cv2.imdecode(data, cv2.IMREAD_COLOR)
 
@@ -20,7 +25,9 @@ def read_image(img_path: Path):
 
   return img
 
-def hstack_images(images, height=None, pad=10, bg=(255, 255, 255)):
+def hstack_images(images: Sequence[np.ndarray], height: int | None = None,
+                  pad: int = 10,
+                  bg: tuple[int, int, int] = (255, 255, 255)) -> np.ndarray:
   """横向拼接：统一高度后左右排列"""
   imgs = [cv2.cvtColor(i, cv2.COLOR_GRAY2BGR) if i.ndim == 2 else i for i in images]
   if height is None:
@@ -39,7 +46,9 @@ def hstack_images(images, height=None, pad=10, bg=(255, 255, 255)):
   return canvas
 
 
-def vstack_images(images, width=None, pad=10, bg=(255, 255, 255)):
+def vstack_images(images: Sequence[np.ndarray], width: int | None = None,
+                  pad: int = 10,
+                  bg: tuple[int, int, int] = (255, 255, 255)) -> np.ndarray:
   """纵向拼接：统一宽度后上下排列"""
   imgs = [cv2.cvtColor(i, cv2.COLOR_GRAY2BGR) if i.ndim == 2 else i for i in images]
   if width is None:
@@ -58,10 +67,10 @@ def vstack_images(images, width=None, pad=10, bg=(255, 255, 255)):
   return canvas
 
 
-def loop_stop(times):
-  def _decorator(func):
+def loop_stop(times: int) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+  def _decorator(func: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(func)
-    def _wrapper(*arg, **kwargs):
+    def _wrapper(*arg: Any, **kwargs: Any) -> Any:
       for i in range(times):
         result = func(*arg, **kwargs)
       return result
@@ -75,7 +84,8 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-def tensor2img(tensor, mean=IMAGENET_MEAN, std=IMAGENET_STD):
+def tensor2img(tensor: Any, mean: Sequence[float] = IMAGENET_MEAN,
+               std: Sequence[float] = IMAGENET_STD) -> np.ndarray:
   """把归一化后的图像张量还原成可显示 / 可保存的 BGR uint8 图
 
   Args:
@@ -103,9 +113,12 @@ def tensor2img(tensor, mean=IMAGENET_MEAN, std=IMAGENET_STD):
   return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
-def draw_quads(img, quads, labels=None, scores=None, color=(0, 255, 0),
-               thickness=2, normalized=True, tag="", font_scale=0.5,
-               inplace=False, label_pos="top", skip_edges=None):
+def draw_quads(img: np.ndarray, quads: Any, labels: Sequence[int] | None = None,
+               scores: Sequence[float] | None = None,
+               color: tuple[int, int, int] = (0, 255, 0), thickness: int = 2,
+               normalized: bool = True, tag: str = "", font_scale: float = 0.5,
+               inplace: bool = False, label_pos: str = "top",
+               skip_edges: Any = None) -> np.ndarray:
   """在图上画出若干四边形，可带「数字 + 置信度」标签（推理 / 训练结果可视化用）
 
   Args:
@@ -191,7 +204,7 @@ def draw_quads(img, quads, labels=None, scores=None, color=(0, 255, 0),
   return vis
 
 
-def save_image(img, path):
+def save_image(img: np.ndarray, path: Path | str) -> Path:
   """保存图片（imencode + tofile，避开 Windows 中文路径下 cv2.imwrite 失败）
 
   Args:

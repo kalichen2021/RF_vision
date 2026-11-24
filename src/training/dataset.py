@@ -21,7 +21,7 @@ _STD = np.asarray(IMAGENET_STD, np.float32)[:, None, None]
 DatasetMode = Literal["training", "testing"]
 
 
-def collate_fn(batch):
+def collate_fn(batch: list[tuple[np.ndarray, np.ndarray, np.ndarray]]) -> tuple:
   """把 numpy 样本拼成 batch 张量
 
   torch 在这里才 import：DataLoader worker 会 pickle/反序列化本模块，

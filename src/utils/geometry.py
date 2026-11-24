@@ -1,11 +1,18 @@
+"""几何工具：点序归一化、随机透视矩阵、透视变换与四边形→矩阵。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
 import cv2
 import numpy as np
-from dataclasses import dataclass
 from numpy.typing import NDArray
-from pathlib import Path
+
 from .debug_tools import cv_show
 
-def order_quad(q, reset = True) -> NDArray[np.floating]:
+def order_quad(q: NDArray[np.floating], reset: bool = True) -> NDArray[np.floating]:
   """将任意顺序的四个点排序为 [左上, 右上, 右下, 左下]（图像坐标，y 向下）。
     「绕质心极角排序 → 旋转到左上 → 方向校准」，对任意
     凸四边形都只会得到 4 个互不相同的点。
@@ -74,13 +81,15 @@ class QuadMatrix(np.ndarray):
   dst_quad: NDArray[np.float64] | None = None
   src_size: tuple[int, int] | None = None
 
-  def __new__(cls, M, dst_quad=None, src_size=None):
+  def __new__(cls, M: NDArray[np.floating],
+              dst_quad: NDArray[np.floating] | None = None,
+              src_size: tuple[int, int] | None = None) -> "PerspectiveM":
     obj = np.asarray(M, dtype=np.float64).view(cls)
     obj.dst_quad = None if dst_quad is None else np.asarray(dst_quad, dtype=np.float64).reshape(4, 2)
     obj.src_size = None if src_size is None else (int(src_size[0]), int(src_size[1]))
     return obj
 
-  def __array_finalize__(self, obj):
+  def __array_finalize__(self, obj: Any) -> None:
     self.dst_quad = getattr(obj, "dst_quad", None)
     self.src_size = getattr(obj, "src_size", None)
     
@@ -94,12 +103,14 @@ class OffsetImg(np.ndarray):
   """
   offset: NDArray[np.uint32] | None = None
 
-  def __new__(cls, img, offset=None):
+  def __new__(cls, img: NDArray[np.uint8],
+              offset: NDArray[np.uint32] | tuple[int, int] | None = None
+              ) -> "OffsetImg":
     obj = np.asarray(img, dtype=np.uint8).view(cls)
     obj.offset = None if offset is None else np.asarray(offset, dtype=np.uint32)
     return obj
 
-  def __array_finalize__(self, obj):
+  def __array_finalize__(self, obj: Any) -> None:
     self.offset = getattr(obj, "offset", None)
 
 
@@ -116,7 +127,7 @@ class QuadSegment:
   """
   quad: NDArray[np.float64]
 
-  def __post_init__(self):
+  def __post_init__(self) -> None:
     self.quad = np.asarray(self.quad, dtype=np.float64).reshape(4, 2)
 
   @property
@@ -161,7 +172,13 @@ def _get_quad_wh(w: int, h: int, M: NDArray[np.floating]) -> tuple[int, int]:
   return new_w, new_h
 
 
-def get_rand_M(w: int, h: int, scale_range=(0.8, 1.2), shear_range=(-0.2, 0.2), rotation_range=(-15, 15), translation_range=(-0.2, 0.2), perspective_range=(-0.001, 0.001)) -> NDArray[np.float64]:
+def get_rand_M(w: int, h: int,
+               scale_range: tuple[float, float] = (0.8, 1.2),
+               shear_range: tuple[float, float] = (-0.2, 0.2),
+               rotation_range: tuple[float, float] = (-15, 15),
+               translation_range: tuple[float, float] = (-0.2, 0.2),
+               perspective_range: tuple[float, float] = (-0.001, 0.001)
+               ) -> NDArray[np.float64]:
   """生成随机的射影变换矩阵
 
   Parameters
@@ -216,7 +233,9 @@ def get_rand_M(w: int, h: int, scale_range=(0.8, 1.2), shear_range=(-0.2, 0.2), 
   return M
 
 
-def proj_tran(img: NDArray[np.uint8], M: NDArray[np.floating], overflow = False, dst_quad = None) -> NDArray[np.uint8]:
+def proj_tran(img: NDArray[np.uint8], M: NDArray[np.floating],
+              overflow: bool = False,
+              dst_quad: NDArray[np.floating] | None = None) -> NDArray[np.uint8]:
   """将图片进行射影变换
 
   Parameters
@@ -276,7 +295,8 @@ def proj_tran(img: NDArray[np.uint8], M: NDArray[np.floating], overflow = False,
                  offset=(x_min, y_min))
 
 
-def quad2M(quad, w: int = 0, h: int = 0) -> NDArray[np.float64]:
+def quad2M(quad: NDArray[np.floating], w: int = 0, h: int = 0
+           ) -> NDArray[np.float64]:
   """生成把 (0, 0)-(w-1, h-1) 矩形映射到 quad 的射影变换矩阵
 
   Parameters

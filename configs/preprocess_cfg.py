@@ -14,7 +14,7 @@ class PreprocessConfig:
   """合成样本生成的全部参数。"""
 
   # 本次批量生成要产出的样本总数（`-n` 可临时覆盖）
-  SAMPLE_GEN_NUM: int = 2000
+  SAMPLE_GEN_NUM: int = 10
   # 数字类别数（贴图池覆盖 0 ~ N-1，需要 >= 10 才能覆盖 0~9）
   SAMPLE_COUNT_RATE: int = 10
   # 每张样本包含的数字个数范围（含两端）；凑不够下限就换一张图重试
@@ -28,24 +28,24 @@ class PreprocessConfig:
 
   # --------QUADS---------（目标：模拟「板上写着数字」的平面放置）
   # 畸变容忍度（映射为允许长宽比 1.5 + 3.5*d），板子接近矩形，取偏小值
-  DISTORTION: tuple[float, float] = (0.0, 0.1)
+  DISTORTION: tuple[float, float] = (0.0, 0.01)
   # 网格弯曲度：板是刚体，必须为 0，否则切出来的格子不是平面四边形的透视投影
   NORMALIZE: tuple[float, float] = (0.0, 0.0)
   # 数字四边形面积（像素²）：<1 时按占平坦区域面积的比例解释；
   # 板面会按 BOARD_MARGIN 自动放大，给数字留出板边
   AREA_RANGE: tuple[int, int] = (10000, 80000)
   # 笔画粗细 / 画布尺寸的候选，用来增加字形多样性
-  THICKNESS_CHOICES: tuple[int, ...] = (-1, 0, 0, 1, 1, 2, 3)
+  THICKNESS_CHOICES: tuple[int, ...] = (0, 0, 1, 1, 2, 3, 3, 4, 4)
   CANVAS_CHOICES: tuple[int, ...] = (48, 64, 64, 80)
   # 每个数字渲染几个字形变体（不同字体 / 字重 / 画布）
-  FONT_VARIANTS: int = 3
+  FONT_VARIANTS: int = 5
 
   # 从候选板位里选多少块真放数字（仅当 SAMPLE_DIGIT_RANGE 为 None 时作为旧逻辑使用）
   QUADS_SELECT_RATE: float = 0.5
 
   # --------FUSE / DEFOCUS（数字融合 + 景深失焦）---------
   # 数字与环境的对比度区间（|数字 - 背景| / 255），越大数字越醒目
-  CONTRAST_RANGE: tuple[float, float] = (0.35, 0.70)
+  CONTRAST_RANGE: tuple[float, float] = (0.35, 0.90)
   # 数字与环境的融合透明度区间，越大数字越「实」
   FUSE_ALPHA: tuple[float, float] = (0.55, 0.95)
   # 失焦强度倍率：0 = 全部清晰，越大非基准平面的数字越糊
@@ -71,9 +71,9 @@ class PreprocessConfig:
   # 旧参数：板面相对背景的亮度偏移，仅当 BOARD_GRAY 为 None 时生效
   BOARD_TONE: tuple[int, int] = (12, 30)
   # 数字在板面内的内缩比例，相当于板子给数字留的边距
-  BOARD_MARGIN: float = 0.18
+  BOARD_MARGIN: float = 0
   # 是否给板面画软投影（能提供更强的平面 / 遮挡线索）
-  BOARD_SHADOW: bool = True
+  BOARD_SHADOW: bool = False
   # 判定「同一平面」的深度容差（0~1）
   PLANE_TOL: float = 0.12
   # 基准平面的深度；None 表示按深度最集中的一簇自动挑选

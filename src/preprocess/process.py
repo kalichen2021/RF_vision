@@ -28,7 +28,8 @@ _UUID = LogConfig.UUID
 _logger = get_logger(__name__)
 
 
-def build_record(name, img, labels, extra=None):
+def build_record(name: str, img: NDArray[np.uint8], labels: list[dict],
+                 extra: dict | None = None) -> dict:
   """构造一条样本标签记录（`image` / `width` / `height` / extra / `objects`）
 
   Args:
@@ -49,7 +50,9 @@ def build_record(name, img, labels, extra=None):
   return record
 
 
-def save_sample(out_dir, name, img, labels, extra=None, write_labels=True):
+def save_sample(out_dir: Path | str, name: str, img: NDArray[np.uint8],
+                labels: list[dict], extra: dict | None = None,
+                write_labels: bool = True) -> tuple[Path, Path | None]:
   """保存一个训练样本：灰度 PNG（可选：单个 JSON 标签）
 
   Args:
@@ -81,7 +84,8 @@ def save_sample(out_dir, name, img, labels, extra=None, write_labels=True):
   return img_path, lbl_path
 
 
-def save_dataset(out_dir, records, filename="labels.json"):
+def save_dataset(out_dir: Path | str, records: list[dict],
+                 filename: str = "labels.json") -> Path:
   """把整批样本的标签合并写成一个 JSON（`{"count": n, "samples": [...]}`）
 
   Args:
@@ -104,20 +108,27 @@ def save_dataset(out_dir, records, filename="labels.json"):
 
 
 class Preprocess:
-  def __init__(self, distortion, normalize, area_range, quads_select_rate,
-               contrast_range=ppcfg.CONTRAST_RANGE, fuse_alpha=ppcfg.FUSE_ALPHA,
-               defocus_strength=ppcfg.DEFOCUS_STRENGTH,
-               defocus_max_sigma=ppcfg.DEFOCUS_MAX_SIGMA,
-               persp_spread=ppcfg.DEFOCUS_PERSPECTIVE,
-               base_depth=None, plane_tol=ppcfg.PLANE_TOL,
-               board_tone=ppcfg.BOARD_TONE, board_margin=ppcfg.BOARD_MARGIN,
-               board_shadow=ppcfg.BOARD_SHADOW,
-               defocus_size_ratio=ppcfg.DEFOCUS_SIZE_RATIO,
-               digit_count_range=ppcfg.SAMPLE_DIGIT_RANGE,
-               board_gray=ppcfg.BOARD_GRAY,
-               board_gray_flip=ppcfg.BOARD_GRAY_FLIP,
-               polarity_flip_rate=ppcfg.POLARITY_FLIP_RATE,
-               min_visible_contrast=ppcfg.MIN_VISIBLE_CONTRAST):
+  def __init__(self, distortion: tuple[float, float],
+               normalize: tuple[float, float],
+               area_range: tuple[float, float],
+               quads_select_rate: float,
+               contrast_range: tuple[float, float] = ppcfg.CONTRAST_RANGE,
+               fuse_alpha: tuple[float, float] = ppcfg.FUSE_ALPHA,
+               defocus_strength: float = ppcfg.DEFOCUS_STRENGTH,
+               defocus_max_sigma: float = ppcfg.DEFOCUS_MAX_SIGMA,
+               persp_spread: float = ppcfg.DEFOCUS_PERSPECTIVE,
+               base_depth: float | None = None,
+               plane_tol: float = ppcfg.PLANE_TOL,
+               board_tone: tuple[float, float] = ppcfg.BOARD_TONE,
+               board_margin: float = ppcfg.BOARD_MARGIN,
+               board_shadow: bool = ppcfg.BOARD_SHADOW,
+               defocus_size_ratio: float = ppcfg.DEFOCUS_SIZE_RATIO,
+               digit_count_range: tuple[int, int] | None = ppcfg.SAMPLE_DIGIT_RANGE,
+               board_gray: tuple[int, int] | None = ppcfg.BOARD_GRAY,
+               board_gray_flip: tuple[int, int] = ppcfg.BOARD_GRAY_FLIP,
+               polarity_flip_rate: float = ppcfg.POLARITY_FLIP_RATE,
+               min_visible_contrast: float = ppcfg.MIN_VISIBLE_CONTRAST
+               ) -> None:
     self.config = {
         "distortion": distortion,
         "normalize": normalize,
@@ -155,7 +166,7 @@ class Preprocess:
     # 这样 inset_quad 内缩之后，数字面积正好落在 AREA_RANGE 里
     self.area_scale = (1.0 - 2.0 * float(board_margin)) ** 2
 
-  def detect_quads(self, env_img):
+  def detect_quads(self, env_img: NDArray[np.uint8]) -> list[NDArray[np.float64]]:
     """检测环境图上的平坦区域（同一张图结果确定，批量生成时可缓存复用）
 
     Args:
@@ -168,7 +179,8 @@ class Preprocess:
         env_img, cv2.COLOR_BGR2GRAY)
     return get_flat_quad(gray)
 
-  def _quad_capacity(self, quads):
+  def _quad_capacity(self, quads: list[NDArray[np.float64]]
+                     ) -> list[tuple[int, NDArray[np.float64]]]:
     """估算各平坦区域最多能放几块板（按最小板位面积）
 
     Returns:
@@ -188,7 +200,10 @@ class Preprocess:
     capacity.sort(key=lambda item: item[0], reverse=True)
     return capacity
 
-  def _build_segments(self, quads, target_count, capacity=None):
+  def _build_segments(self, quads: list[NDArray[np.float64]],
+                      target_count: int,
+                      capacity: list[tuple[int, NDArray[np.float64]]] | None = None
+                      ) -> list:
     """按「这张图要放 target_count 个数字」分配板位
 
     每个平坦区域的容量 ≈ 区域面积 / 单块最小板位面积。按容量从大到小分配
@@ -221,8 +236,13 @@ class Preprocess:
         segments.extend(best)
     return segments
 
-  def process(self, _font_imgs, env_img, show_cnt: bool = False, quads=None,
-              digit_ids=None, debug_dir: Path | None = None):
+  def process(self, _font_imgs: list[NDArray[np.uint8]],
+              env_img: NDArray[np.uint8],
+              show_cnt: bool = False,
+              quads: list[NDArray[np.float64]] | None = None,
+              digit_ids: list[int] | None = None,
+              debug_dir: Path | None = None
+              ) -> tuple[NDArray[np.uint8] | None, list[dict]]:
     """把数字贴到环境图的平面上，返回 (灰度合成图, 标签列表)
 
     标签按“板面 → 数字内缩四边形”的顺序给出，每个元素包含：

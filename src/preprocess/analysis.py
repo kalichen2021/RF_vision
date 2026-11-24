@@ -54,20 +54,14 @@ Sample dataset format.
 }
 '''
 """
-import argparse
 import json
-import sys
 from collections import Counter
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import font_manager
-
-from src.utils.logging_tools import get_logger
-
-_logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------- 读取
@@ -105,7 +99,7 @@ def load_dataset(dataset_dir: str | Path) -> list[dict]:
   return [s for s in samples if s.get("objects")]
 
 
-def iter_objects(samples: Iterable[dict]):
+def iter_objects(samples: Iterable[dict]) -> Iterator[tuple[dict, dict]]:
   """遍历所有 `(样本, object)` 组合"""
   for sample in samples:
     for obj in sample.get("objects", []):
@@ -141,7 +135,7 @@ def quad_aspect(quad: Sequence[Sequence[float]]) -> float:
 class Analysis:
   """分析数据集的统计信息，并提供 matplotlib 可视化。"""
 
-  def __init__(self, dataset_dir: str | Path):
+  def __init__(self, dataset_dir: str | Path) -> None:
     self.dataset_dir = Path(dataset_dir)
     self.samples = load_dataset(self.dataset_dir)
     if not self.samples:
@@ -230,7 +224,8 @@ class Analysis:
 
   def summary(self) -> dict:
     """汇总关键统计量（同时打印到控制台）"""
-    def _pct(values, qs=(0, 5, 50, 95, 100)) -> dict[str, float]:
+    def _pct(values: Sequence[float],
+             qs: Sequence[float] = (0, 5, 50, 95, 100)) -> dict[str, float]:
       if not values:
         return {}
       arr = np.asarray(values, dtype=float)
@@ -247,6 +242,7 @@ class Analysis:
         "dataset_dir": str(self.dataset_dir),
         "n_samples": self.n_samples,
         "n_digits": self.n_digits,
+        "digit_counts": digit_counts,
         "n_sources": len(src_stats),
         "digits_per_sample": {
             "mean": float(per_sample.mean()) if len(per_sample) else 0.0,
@@ -269,50 +265,11 @@ class Analysis:
         "top_sources": top_sources,
     }
 
-    _logger.info("\n数据集: %s", stats['dataset_dir'])
-    _logger.info("  样本数        : %s", stats['n_samples'])
-    _logger.info("  数字总数      : %s", stats['n_digits'])
-    _logger.info("  源图数        : %s", stats['n_sources'])
-    _logger.info("  每样本数字数  : mean=%.2f min=%d max=%d median=%.1f",
-                 stats['digits_per_sample']['mean'],
-                 stats['digits_per_sample']['min'],
-                 stats['digits_per_sample']['max'],
-                 stats['digits_per_sample']['median'])
-    _logger.info("  数字类别分布  : %s", digit_counts)
-    _logger.info("  类别均衡度    : %.3f (min/max)", stats['digit_balance'])
-    if self.areas:
-      _logger.info("  数字四边形面积(pixel^2): min=%.0f p5=%.0f p50=%.0f "
-                   "p95=%.0f max=%.0f",
-                   stats['quad_area']['p0'], stats['quad_area']['p5'],
-                   stats['quad_area']['p50'], stats['quad_area']['p95'],
-                   stats['quad_area']['p100'])
-      _logger.info("  数字宽度/高度(pixel)  : w_p50=%.1f h_p50=%.1f "
-                   "aspect_p50=%.2f aspect_p95=%.2f",
-                   stats['quad_width']['p50'], stats['quad_height']['p50'],
-                   stats['quad_aspect']['p50'], stats['quad_aspect']['p95'])
-    if self.board_ratios:
-      _logger.info("  板面/数字面积比       : p5=%.2f p50=%.2f p95=%.2f",
-                   stats['board_digit_ratio']['p5'],
-                   stats['board_digit_ratio']['p50'],
-                   stats['board_digit_ratio']['p95'])
-    if self.depths:
-      _logger.info("  depth                 : min=%.3f p50=%.3f max=%.3f",
-                   stats['depth']['p0'], stats['depth']['p50'],
-                   stats['depth']['p100'])
-    if self.sigmas:
-      _logger.info("  sigma                 : min=%.2f p50=%.2f max=%.2f",
-                   stats['sigma']['p0'], stats['sigma']['p50'],
-                   stats['sigma']['p100'])
-    _logger.info("  数字最多的源图:")
-    for src, s in top_sources:
-      _logger.info("    %-16s samples=%-4d digits=%d",
-                   src, s['samples'], s['digits'])
-
     return stats
 
   # ------------------------------------------------------------ 单图绘制
 
-  def plot_digits(self, ax) -> None:
+  def plot_digits(self, ax: plt.Axes) -> None:
     """数字类别分布柱状图"""
     counts = self.digit_counts()
     digits = list(counts)
@@ -325,7 +282,7 @@ class Analysis:
     ax.set_xlabel("digit")
     ax.set_ylabel("数量")
 
-  def plot_digits_per_sample(self, ax) -> None:
+  def plot_digits_per_sample(self, ax: plt.Axes) -> None:
     """每张样本的数字个数分布"""
     values = self.digits_per_sample
     if not values:
@@ -339,7 +296,7 @@ class Analysis:
     ax.set_ylabel("样本数")
     ax.set_xticks(range(0, hi + 1, 2 if hi > 12 else 1))
 
-  def plot_sources(self, ax, top: int = 15) -> None:
+  def plot_sources(self, ax: plt.Axes, top: int = 15) -> None:
     """来源图贡献的数字数（Top N）"""
     stats = self.source_stats()
     items = sorted(stats.items(), key=lambda kv: kv[1]["digits"],
@@ -355,7 +312,7 @@ class Analysis:
     ax.set_title(f"来源图片数字数 (Top {len(names)}/{len(stats)})")
     ax.set_xlabel("digits")
 
-  def plot_quad_area(self, ax) -> None:
+  def plot_quad_area(self, ax: plt.Axes) -> None:
     """数字四边形面积分布"""
     if not self.areas:
       ax.set_visible(False)
@@ -368,7 +325,7 @@ class Analysis:
     ax.set_ylabel("数量")
     ax.legend(fontsize=8)
 
-  def plot_area_ratio(self, ax) -> None:
+  def plot_area_ratio(self, ax: plt.Axes) -> None:
     """数字面积占整图面积比例"""
     if not self.area_ratios:
       ax.set_visible(False)
@@ -378,7 +335,7 @@ class Analysis:
     ax.set_xlabel("ratio")
     ax.set_ylabel("数量")
 
-  def plot_width_height(self, ax) -> None:
+  def plot_width_height(self, ax: plt.Axes) -> None:
     """数字宽高散点（等比例参考线）"""
     if not self.widths:
       ax.set_visible(False)
@@ -390,7 +347,7 @@ class Analysis:
     ax.set_xlabel("width (pixel)")
     ax.set_ylabel("height (pixel)")
 
-  def plot_aspect(self, ax) -> None:
+  def plot_aspect(self, ax: plt.Axes) -> None:
     """数字四边形长宽比"""
     if not self.aspects:
       ax.set_visible(False)
@@ -404,7 +361,7 @@ class Analysis:
     ax.set_ylabel("数量")
     ax.legend(fontsize=8)
 
-  def plot_board_area(self, ax) -> None:
+  def plot_board_area(self, ax: plt.Axes) -> None:
     """板面四边形面积分布"""
     if not self.board_areas:
       ax.set_visible(False)
@@ -417,7 +374,7 @@ class Analysis:
     ax.set_ylabel("数量")
     ax.legend(fontsize=8)
 
-  def plot_centers(self, ax) -> None:
+  def plot_centers(self, ax: plt.Axes) -> None:
     """数字中心位置热力图（归一化坐标）"""
     if not self.centers_x:
       ax.set_visible(False)
@@ -430,7 +387,7 @@ class Analysis:
     ax.set_ylabel("y / height")
     plt.colorbar(h[3], ax=ax, fraction=0.046, pad=0.03)
 
-  def plot_depth(self, ax) -> None:
+  def plot_depth(self, ax: plt.Axes) -> None:
     """深度分布"""
     if not self.depths:
       ax.set_visible(False)
@@ -440,7 +397,7 @@ class Analysis:
     ax.set_xlabel("depth")
     ax.set_ylabel("数量")
 
-  def plot_sigma(self, ax) -> None:
+  def plot_sigma(self, ax: plt.Axes) -> None:
     """失焦 sigma 分布"""
     if not self.sigmas:
       ax.set_visible(False)
@@ -452,7 +409,7 @@ class Analysis:
 
   # ------------------------------------------------------------ 组合图
 
-  def plot_overview(self):
+  def plot_overview(self) -> plt.Figure:
     """12 面板总览图，返回 matplotlib Figure"""
     _setup_cjk_font()
     fig, axes = plt.subplots(3, 4, figsize=(20, 12))
@@ -491,47 +448,29 @@ class Analysis:
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     return fig
 
-  def run(self, out_path: str | Path | None = None, show: bool = True):
-    """打印统计 + 输出总览图
+  def run(self, out_path: str | Path | None = None,
+          show: bool = True) -> plt.Figure:
+    """生成总览图并按需保存 / 显示（本方法不打印任何东西）。
+
+    报告输出请调 :meth:`summary` 拿到 dict 后由调用方（CLI）负责打印。
 
     Args:
-        out_path: 图片保存路径；None 表示不保存
-        show: 是否交互显示（阻塞）
+        out_path: 图片保存路径；None 表示不保存。
+        show: 是否交互显示（阻塞）。
 
     Returns:
-        matplotlib.figure.Figure: 总览图
+        matplotlib 的 Figure。
     """
-    self.summary()
     fig = self.plot_overview()
     if out_path is not None:
       out_path = Path(out_path)
       out_path.parent.mkdir(parents=True, exist_ok=True)
       fig.savefig(out_path, dpi=130, bbox_inches="tight")
-      _logger.info("\n总览图已保存: %s", out_path)
     if show:
       plt.show()
     else:
       plt.close(fig)
     return fig
-
-
-# ---------------------------------------------------------------- CLI
-
-def _default_dataset_dir() -> Path:
-  """优先 SELECT_IMGSET，否则取最新一个含 labels.json 的目录"""
-  sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-  from configs.path import PathConfig
-
-  if (PathConfig.SELECT_IMGSET / "labels.json").exists():
-    return PathConfig.SELECT_IMGSET
-  candidates = sorted(
-      (p for p in PathConfig.PROCESSED_DIR.iterdir()
-       if p.is_dir() and (p / "labels.json").exists()),
-      key=lambda p: p.name)
-  if not candidates:
-    raise FileNotFoundError(
-        f"{PathConfig.PROCESSED_DIR} 下没有含 labels.json 的数据集")
-  return candidates[-1]
 
 
 def _setup_cjk_font() -> None:
@@ -543,41 +482,3 @@ def _setup_cjk_font() -> None:
   if picked:
     plt.rcParams["font.sans-serif"] = picked + ["DejaVu Sans"]
   plt.rcParams["axes.unicode_minus"] = False
-
-
-def main(argv: list[str] | None = None) -> int:
-  parser = argparse.ArgumentParser(
-      description="数据集统计与 matplotlib 可视化")
-  parser.add_argument("dataset_dir", nargs="?",
-                      help="数据集目录或 labels.json（缺省自动选择）")
-  parser.add_argument("-o", "--out", default=None,
-                      help="总览图保存路径（缺省 dataset/log/analysis/<name>_overview.png）")
-  parser.add_argument("--no-show", action="store_true",
-                      help="不弹窗，仅保存图片")
-  parser.add_argument("--no-save", action="store_true",
-                      help="不保存图片")
-  args = parser.parse_args(argv)
-
-  if args.no_show:
-    import matplotlib
-    matplotlib.use("Agg")
-
-  _setup_cjk_font()
-
-  dataset_dir = (Path(args.dataset_dir) if args.dataset_dir
-                 else _default_dataset_dir())
-
-  out_path = args.out
-  if out_path is None and not args.no_save:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from configs.path import PathConfig
-    out_path = PathConfig.LOG_DIR / "analysis" / \
-        f"{Path(dataset_dir).name}_overview.png"
-
-  analysis = Analysis(dataset_dir)
-  analysis.run(out_path=out_path, show=not args.no_show)
-  return 0
-
-
-if __name__ == "__main__":
-  raise SystemExit(main())

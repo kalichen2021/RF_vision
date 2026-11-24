@@ -31,7 +31,8 @@ def _worker_init(_worker_id: int) -> None:
     pass
 
 
-def build_loaders(batch_size=None, num_workers=None):
+def build_loaders(batch_size: int | None = None,
+                  num_workers: int | None = None) -> tuple:
   """构造训练 / 验证 DataLoader
 
   关键在 `num_workers` / `pin_memory` / `prefetch_factor`：
@@ -77,7 +78,8 @@ def build_loaders(batch_size=None, num_workers=None):
   return ds, dl, ds_test, dl_test
 
 
-def build_opt(model, lr=None):
+def build_opt(model: "torch.nn.Module", lr: float | None = None
+              ) -> "torch.optim.Optimizer":
   """按当前 requires_grad 重建优化器
 
   必须重建：Adam 只为「有梯度」的参数建 state，
@@ -91,7 +93,7 @@ def build_opt(model, lr=None):
   return torch.optim.Adam(params, lr=lr)
 
 
-def make_trainer(epochs: int, ckpt_path, dev: str):
+def make_trainer(epochs: int, ckpt_path: str | Path, dev: str) -> "Trainer":
   """每阶段一个 Trainer（每轮会在测试集上验证，best / 早停看 val loss）"""
   from configs.training_cfg import TrainingConfig as tc
   from src.training.train import Trainer
@@ -102,7 +104,8 @@ def make_trainer(epochs: int, ckpt_path, dev: str):
                  cudnn_benchmark=tc.CUDNN_BENCHMARK)
 
 
-def make_scheduler(opt):
+def make_scheduler(opt: "torch.optim.Optimizer"
+                   ) -> "torch.optim.lr_scheduler.ReduceLROnPlateau":
   """ReduceLROnPlateau：val loss 停滞时按 factor 降 lr
 
     与 CosineAnnealingLR 的区别：不再按固定轮数把 lr 退到 0，

@@ -14,6 +14,7 @@
 import argparse
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -77,7 +78,9 @@ def load_image_tensor(path: Path | str,
   return load_tensor(path, img_size, mode="gray", interp="linear")
 
 
-def visualize_files(paths, thr=0.3, topk=30, out_dir=OUT_DIR):
+def visualize_files(paths: Sequence[Path | str], thr: float = 0.3,
+                    topk: int = 30, out_dir: Path = OUT_DIR
+                    ) -> tuple[Path, int, int]:
   """对任意图片文件跑推理（没有 GT，只画预测框）
 
   Args:
@@ -112,7 +115,8 @@ def visualize_files(paths, thr=0.3, topk=30, out_dir=OUT_DIR):
   return out_dir, saved, n_det
 
 
-def resolve_index(ds, index=None, name=None) -> int:
+def resolve_index(ds: DigitDataset, index: int | None = None,
+                  name: str | None = None) -> int:
   """定位测试集里的某一张：优先按文件名关键字，其次按序号
 
   Args:
@@ -142,8 +146,9 @@ def resolve_index(ds, index=None, name=None) -> int:
   return idx % total
 
 
-def visualize(limit=None, thr=0.3, topk=30, out_dir=OUT_DIR,
-              index=None, name=None):
+def visualize(limit: int | None = None, thr: float = 0.3, topk: int = 30,
+              out_dir: Path = OUT_DIR, index: int | None = None,
+              name: str | None = None) -> tuple[Path, int, int]:
   """跑测试集（或其中一张），把 GT 与预测画到同一张图并存盘
 
   Args:
@@ -198,7 +203,7 @@ def visualize(limit=None, thr=0.3, topk=30, out_dir=OUT_DIR,
 
   return out_dir, saved, n_det
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
   """命令行入口，返回进程退出码"""
   parser = argparse.ArgumentParser(description="测试集推理 + 可视化")
   parser.add_argument("-l", "--limit", type=int, default=None,

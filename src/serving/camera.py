@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -54,11 +55,16 @@ class CameraDetector:
       capture: 自定义 VideoCapture（测试注入用），None 时按 `index` 打开
   """
 
-  def __init__(self, inferrer, index=0, img_size=(384, 384), width=1280,
-               height=720, thr=0.3, topk=30, show=True,
-               window_name="digits_tracker", max_fps=None, save_dir=None,
-               thickness=2, font_scale=0.55, rotate=0, input_mode=None,
-               capture=None):
+  def __init__(self, inferrer: Any, index: int = 0,
+               img_size: tuple[int, int] = (384, 384),
+               width: int | None = 1280, height: int | None = 720,
+               thr: float = 0.3, topk: int = 30, show: bool = True,
+               window_name: str = "digits_tracker",
+               max_fps: float | None = None,
+               save_dir: Path | None = None, thickness: int = 2,
+               font_scale: float = 0.55, rotate: int = 0,
+               input_mode: str | None = None,
+               capture: Any = None) -> None:
     self.inferrer = inferrer
     self.img_size = tuple(img_size)
     self.thr = float(thr)
@@ -82,7 +88,8 @@ class CameraDetector:
 
   # ---------------- 资源管理 ----------------
   @staticmethod
-  def _open(index, width, height):
+  def _open(index: int, width: int | None,
+            height: int | None) -> cv2.VideoCapture:
     """打开摄像头并按需设置分辨率（有些相机忽略分辨率设置，属正常）"""
     cap = cv2.VideoCapture(int(index))
     if width:
@@ -111,25 +118,25 @@ class CameraDetector:
   def __enter__(self) -> "CameraDetector":
     return self
 
-  def __exit__(self, exc_type, exc, tb) -> bool:
+  def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
     self.close()
     return False
 
   # ---------------- 旋转 ----------------
   @staticmethod
-  def normalize_rotate(angle) -> int:
+  def normalize_rotate(angle: int) -> int:
     """把任意角度归一化到 0/90/180/270（顺时针）"""
     angle = int(angle) % 360
     if angle % 90:
       raise ValueError(f"旋转角度必须是 90 的倍数，收到 {angle}")
     return angle
 
-  def set_rotate(self, angle) -> int:
+  def set_rotate(self, angle: int) -> int:
     """设置顺时针旋转角度并返回生效值（0/90/180/270）"""
     self.rotate = self.normalize_rotate(angle)
     return self.rotate
 
-  def rotate_frame(self, frame):
+  def rotate_frame(self, frame: np.ndarray) -> np.ndarray:
     """按 `self.rotate` 顺时针旋转 BGR 帧；0° 时原样返回
 
     显示与推理都必须经过这里，保证「看到的就是模型读到的」。
@@ -158,7 +165,8 @@ class CameraDetector:
     return to_tensor(frame, self.img_size, self.input_mode,
                      rtcfg.RESIZE_INTERP)
 
-  def detect(self, frame):
+  def detect(self, frame: np.ndarray
+             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """单帧推理 + 解码（传进来的帧需已按 `self.rotate` 旋转过）
 
     Returns:
@@ -168,7 +176,9 @@ class CameraDetector:
     return self.inferrer.predict(self.frame2tensor(frame),
                                  thr=self.thr, topk=self.topk)[0]
 
-  def draw(self, frame, result):
+  def draw(self, frame: np.ndarray,
+           result: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+           ) -> np.ndarray:
     """把检测结果画到帧上，返回新图（不改入参）"""
     pts, digits, scores = result
     return draw_quads(frame, pts.numpy(), digits.tolist(), scores.tolist(),
@@ -176,7 +186,7 @@ class CameraDetector:
                       font_scale=self.font_scale)
 
   # ---------------- 主循环 ----------------
-  def run(self, max_frames=None) -> int:
+  def run(self, max_frames: int | None = None) -> int:
     """持续检测直到退出，返回处理的帧数
 
     退出条件：按 `q` / `ESC`、摄像头断流、或达到 `max_frames`。
@@ -233,7 +243,7 @@ class CameraDetector:
 
     return self.frames
 
-  def snapshot(self, img=None) -> Path | None:
+  def snapshot(self, img: np.ndarray | None = None) -> Path | None:
     """把当前画面存盘（默认存最近一帧）"""
     img = self.last_frame if img is None else img
     if self.save_dir is None:

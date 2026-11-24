@@ -38,7 +38,7 @@ _STD = list(IMAGENET_STD)
 _logger = get_logger(__name__)
 
 
-def build_transform(img_size=(384, 384)):
+def build_transform(img_size: tuple[int, int] = (384, 384)) -> T.Compose:
   """训练时用的预处理（灰度 PNG 也要补成三通道，r18 只吃 3 通道）
 
   Args:
@@ -67,7 +67,7 @@ def load_image(path: str | Path, img_size: tuple[int, int] = (384, 384)) -> torc
   return load_tensor(path, img_size, mode="rgb", interp="linear")
 
 
-def _strip_head_dropout(model) -> bool:
+def _strip_head_dropout(model: "torch.nn.Module") -> bool:
   """把三个 head 里的 Dropout2d 去掉（用于兼容「无 dropout 结构」的旧权重）
 
   Dropout 在 `eval()` 下是恒等映射，去掉它不改变推理结果，
@@ -100,8 +100,9 @@ class Inferer:
       img_size (tuple[int, int]): 网络输入尺寸，必须与训练时一致
   """
 
-  def __init__(self, model, ckpt_path, device="cpu", num_classes=10,
-               img_size=(384, 384)):
+  def __init__(self, model: CenterNetDigit, ckpt_path: str | Path,
+               device: str = "cpu", num_classes: int = 10,
+               img_size: tuple[int, int] = (384, 384)) -> None:
     self.device = torch.device(device)
     self.img_size = tuple(img_size)
     self.model = self._load(model,Path(ckpt_path), num_classes)
@@ -109,7 +110,8 @@ class Inferer:
     self.tf = build_transform(self.img_size)
 
   @staticmethod
-  def _load(model, ckpt_path, num_classes):
+  def _load(model: CenterNetDigit, ckpt_path: Path,
+            num_classes: int) -> CenterNetDigit:
     """把 checkpoint 还原成可用的模型
 
     兼容三种存法：
@@ -161,7 +163,9 @@ class Inferer:
 
   @staticmethod
   @torch.no_grad()
-  def decode(hm_p, reg_p, cls_p, thr=0.3, topk=30):
+  def decode(hm_p: torch.Tensor, reg_p: torch.Tensor, cls_p: torch.Tensor,
+             thr: float = 0.3, topk: int = 30
+             ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """把三个 head 的输出解码成数字框。
 
     Args:
@@ -209,13 +213,14 @@ class Inferer:
 
     return results
 
-  def infer(self, imgs):
+  def infer(self, imgs: torch.Tensor
+            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """只做前向，返回 `(hm_p, reg_p, cls_p)` 三张原始输出图"""
     self.model.eval()
     with torch.no_grad():
       return self.model(imgs.to(self.device))
     
-  def predict_testing(self, dl):
+  def predict_testing(self, dl: "torch.utils.data.DataLoader") -> list:
     """按 dataloader 批量推理，返回 `(pts_norm, digits, scores)` 三张列表"""
     self.model.eval()
     results = []
@@ -224,7 +229,8 @@ class Inferer:
         results.extend(self.predict(imgs))
     return results
 
-  def predict(self, imgs, thr=0.3, topk=30):
+  def predict(self, imgs: torch.Tensor, thr: float = 0.3, topk: int = 30
+              ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """前向 + 解码，返回结构与 :meth:`decode` 相同
 
     Args:
@@ -235,7 +241,8 @@ class Inferer:
     hm_p, reg_p, cls_p = self.infer(imgs)
     return self.decode(hm_p, reg_p, cls_p, thr=thr, topk=topk)
 
-  def predict_images(self, paths, thr=0.3, topk=30):
+  def predict_images(self, paths: list[Path | str], thr: float = 0.3,
+                     topk: int = 30) -> list:
     """按训练同款预处理批量读图再推理"""
     imgs = torch.cat([self.tf(Image.open(p).convert("RGB")).unsqueeze(0)
                       for p in paths], dim=0)

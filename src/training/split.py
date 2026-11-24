@@ -27,7 +27,7 @@ import json
 import random
 import sys
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
@@ -41,20 +41,35 @@ def _quad_area(quad: Sequence[Sequence[float]]) -> float:
   return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2.0)
 
 
-def sample_area(sample: dict) -> float:
-  """样本的数字四边形平均面积（没有数字时返回 0）
+def sample_area(sample: dict[str, Any]) -> float:
+  """样本的数字四边形平均面积（没有数字时返回 0）。
 
   用「平均」而不是「总和」：样本内数字个数差别很大，总和会被个数带偏，
   分层时会把「数字多的小样本」和「数字少的大样本」混在一起。
+
+  Args:
+      sample: ``labels.json`` 里的一条样本记录。
+
+  Returns:
+      平均面积（像素²）；没有数字时为 0.0。
   """
   objects = sample.get("objects") or []
   areas = [_quad_area(o["quad"]) for o in objects if o.get("quad")]
   return float(np.mean(areas)) if areas else 0.0
 
 
-def area_percentiles(samples: Iterable[dict],
-                     qs=(0, 10, 50, 90, 100)) -> dict[str, float]:
-  """一批样本的面积分位数（只统计有数字的样本）"""
+def area_percentiles(samples: Iterable[dict[str, Any]],
+                     qs: Sequence[float] = (0, 10, 50, 90, 100)
+                     ) -> dict[str, float]:
+  """一批样本的面积分位数（只统计有数字的样本）。
+
+  Args:
+      samples: 样本记录序列。
+      qs: 需要计算的分位点（百分位）。
+
+  Returns:
+      ``{"p0": ..., "p50": ...}``；没有可用样本时返回空 dict。
+  """
   areas = np.asarray([sample_area(s) for s in samples if s.get("objects")],
                      dtype=np.float64)
   if areas.size == 0:

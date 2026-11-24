@@ -1,6 +1,7 @@
 import os
 import time
 from pathlib import Path
+from typing import Any, Iterable
 
 import torch
 from torch.utils.data import DataLoader
@@ -14,9 +15,10 @@ _logger = get_logger(__name__)
 
 
 class Trainer:
-  def __init__(self, epochs, device, early_stopping_patience: int = 3,
-               ckpt_path="ckpt_last.pt", use_amp: bool = False,
-               cudnn_benchmark: bool = False):
+  def __init__(self, epochs: int, device: str,
+               early_stopping_patience: int = 3,
+               ckpt_path: str | Path = "ckpt_last.pt",
+               use_amp: bool = False, cudnn_benchmark: bool = False) -> None:
     self.epochs = epochs
     self.device = device
     self.ckpt_path = ckpt_path
@@ -28,7 +30,8 @@ class Trainer:
     # 当前被冻结的 backbone 子模块下标（冻结块的 BN 要在每个 epoch 重新切回 eval）
     self._frozen_blocks: set[int] = set()
 
-  def _load_model(self, model: CenterNetDigit, ckpt_path=None) -> CenterNetDigit:
+  def _load_model(self, model: CenterNetDigit,
+                  ckpt_path: str | Path | None = None) -> CenterNetDigit:
     """把 checkpoint 还原成可用的模型（Trainer 存的是 `model.state_dict()`）
 
     Args:
@@ -56,7 +59,8 @@ class Trainer:
     model.load_state_dict(state)
     return model
 
-  def freeze_backbone(self, model: CenterNetDigit, blocks=None) -> None:
+  def freeze_backbone(self, model: CenterNetDigit,
+                      blocks: Iterable[int] | None = None) -> None:
     """冻结 backbone 参数（默认整个 backbone，只训三个 head）
 
     `requires_grad=False` 只停梯度，Batchnorm 的 running_mean/var 在
@@ -98,7 +102,7 @@ class Trainer:
         block.eval()
 
   @staticmethod
-  def _scheduler_step(scheduler, metric: float) -> None:
+  def _scheduler_step(scheduler: Any, metric: float) -> None:
     """推进学习率调度器
 
     `ReduceLROnPlateau` 必须喂指标（`scheduler.step(metric)`），
@@ -114,7 +118,8 @@ class Trainer:
       scheduler.step()
 
   @torch.no_grad()
-  def _eval_losses(self, model: CenterNetDigit, dataloader: DataLoader):
+  def _eval_losses(self, model: CenterNetDigit, dataloader: DataLoader
+                   ) -> tuple[float, float, float, float]:
     """在给定 dataloader 上跑一遍 eval 模式，返回四路平均 loss
 
     与训练阶段的区别：`model.eval()` 关掉 head 里的 dropout、backbone 的 BN
@@ -294,7 +299,7 @@ class Trainer:
     return best_metric
 
   def evaluate(self, model: CenterNetDigit, dataloader: DataLoader,
-               ckpt_path=None) -> float:
+               ckpt_path: str | Path | None = None) -> float:
     """在测试集上评估模型的泛化能力，返回平均总 loss
 
     Args:

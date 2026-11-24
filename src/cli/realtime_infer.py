@@ -31,7 +31,7 @@ from src.training.model import CenterNetDigit
 from src.utils.logging_tools import setup_logging
 
 
-def build_detector(args) -> CameraDetector:
+def build_detector(args: argparse.Namespace) -> CameraDetector:
   """按命令行参数组装 Inferer + CameraDetector"""
   device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
   # dropout 必须与训练时一致，否则 head 结构不同、权重加载会键名错位
@@ -55,7 +55,7 @@ def build_detector(args) -> CameraDetector:
       input_mode=args.input_mode)
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
   """命令行入口，返回进程退出码"""
   parser = argparse.ArgumentParser(description="摄像头实时数字检测")
   parser.add_argument("-c", "--camera", type=int, default=ccfg.CAMERA_INDEX,

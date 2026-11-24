@@ -52,26 +52,24 @@ def get_font_path(font_name: str | int) -> str:
 
 
 
-def font2img(font_path, char, thickness=1, canvas=64, frontcolor = 0):
-  """将单个字符渲染为固定尺寸的灰度图片数据。
+def font2img(font_path: str, char: str, thickness: int = 1,
+             canvas: int = 64, frontcolor: int = 0) -> np.ndarray:
+  """把单个字符渲染成固定尺寸的灰度图。
 
-  先用指定字体把字符绘制到紧凑的临时画布上（黑字白底），按 thickness
-  做膨胀（加粗）或腐蚀（变细）；当字符超出画布时等比缩小，最后居中
-  贴到 canvas x canvas 的白底画布上。
+  先用指定字体把字符画到紧凑的临时画布上（黑字白底），再按 thickness
+  做膨胀（加粗）/ 腐蚀（变细）；字符超出画布时等比缩小，最后居中贴到
+  ``canvas × canvas`` 的白底画布上。
 
   Args:
-    font_path (str): 字体文件路径（.ttf / .ttc），可通过 get_font_path 获取。
-    char (str): 要渲染的字符，通常为单个字符。
-    thickness (int, optional): 笔画粗细调整量，正数加粗（膨胀），负数变细（腐蚀），0 表示不做处理。
-      Defaults to 1.
-    canvas (int, optional): 输出画布边长（像素），用于确定字号与输出尺寸。
-      Defaults to 64.
-    frontcolor (int, optional): 前景色参数，0为白色， 1为黑色。
-      Defaults to 0.
+      font_path: 字体文件路径（.ttf / .ttc），可用 :func:`get_font_path` 取。
+      char: 要渲染的字符，一般只有一个字符。
+      thickness: 笔画粗细调整量，正数加粗、负数变细、0 不处理。
+      canvas: 输出画布边长（像素），同时决定字号。
+      frontcolor: 前景色参数，0 = 白色前景，1 = 黑色前景。
 
   Returns:
-    np.ndarray: 形状为 (canvas, canvas) 的 uint8 灰度图，白底 (255)、
-    黑字 (0)；若字符为空格等空字形，则返回全白图。
+      ``(canvas, canvas)`` 的 uint8 灰度图，白底 (255)、黑字 (0)；
+      空格等空字形返回全白图。
   """
   canvas = int(canvas)
   thickness = int(thickness)

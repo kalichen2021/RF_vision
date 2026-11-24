@@ -68,7 +68,9 @@ def build_pp() -> Preprocess:
       ppcfg.DEFOCUS_SIZE_RATIO)
 
 
-def make_font_imgs(count=None, fonts=None, variants=FONT_VARIANTS):
+def make_font_imgs(count: int | None = None, fonts: list[str] | None = None,
+                   variants: int = FONT_VARIANTS
+                   ) -> tuple[list[np.ndarray], list[int]]:
   """渲染一批白字黑底的数字贴图（字体 / 字重 / 画布尺寸随机）
 
   每个数字可以出多个字形变体，所以池子长度 ≠ 数字类别数：
@@ -102,8 +104,10 @@ def make_font_imgs(count=None, fonts=None, variants=FONT_VARIANTS):
   return glyphs, digit_ids
 
 
-def pick_env_path(env_paths, usage, failures,
-                  cap=ppcfg.ENV_USE_SOFT_CAP, decay=ppcfg.ENV_USE_DECAY):
+def pick_env_path(env_paths: list[Path], usage: dict[Path, int],
+                  failures: dict[Path, int],
+                  cap: int = ppcfg.ENV_USE_SOFT_CAP,
+                  decay: float = ppcfg.ENV_USE_DECAY) -> Path:
   """按使用次数加权随机选一张环境图
 
   成功使用次数未达 `cap` 时权重为 1；达到后每多用一次权重乘以 `decay`，
