@@ -1,9 +1,9 @@
-"""``src/utils/geometry.py`` 的单元测试（样例）。
+"""`src/utils/geometry.py` 的单元测试（样例）。
 
 覆盖对象：
-- 纯 numpy 逻辑：``order_quad`` / ``_as_3x3`` / ``_get_quad_wh``
-- 携带元数据的子类：``QuadMatrix`` / ``OffsetImg``
-- 依赖 OpenCV 的变换：``quad2M`` / ``proj_tran`` / ``get_rand_M``
+- 纯 numpy 逻辑：`order_quad` / `_as_3x3` / `_get_quad_wh`
+- 携带元数据的子类：`QuadMatrix` / `OffsetImg`
+- 依赖 OpenCV 的变换：`quad2M` / `proj_tran` / `get_rand_M`
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def _signed_area(quad: np.ndarray) -> float:
 
 
 class TestOrderQuad:
-  """``order_quad``：任意顺序的四个点 → [左上, 右上, 右下, 左下]。"""
+  """`order_quad`：任意顺序的四个点 → [左上, 右上, 右下, 左下]。"""
 
   def test_axis_aligned_square(self):
     shuffled = SQUARE[[2, 0, 3, 1]]  # 打乱输入顺序
@@ -71,7 +71,7 @@ class TestOrderQuad:
 
 
 class TestMatrixHelpers:
-  """``_as_3x3`` 与 ``_get_quad_wh``。"""
+  """`_as_3x3` 与 `_get_quad_wh`。"""
 
   def test_as_3x3_pads_affine_matrix(self):
     affine = np.array([[1.0, 0.0, 5.0], [0.0, 1.0, 7.0]])
@@ -91,7 +91,7 @@ class TestMatrixHelpers:
 
 
 class TestMetadataSubclasses:
-  """``QuadMatrix`` / ``OffsetImg`` 的元数据携带能力。"""
+  """`QuadMatrix` / `OffsetImg` 的元数据携带能力。"""
 
   def test_quad_matrix_stores_metadata(self):
     M = QuadMatrix(np.eye(3), dst_quad=QUAD, src_size=(100, 50))
@@ -117,7 +117,7 @@ class TestMetadataSubclasses:
 
 
 class TestQuad2M:
-  """``quad2M``：源矩形 → 目标四边形的射影矩阵。"""
+  """`quad2M`：源矩形 → 目标四边形的射影矩阵。"""
 
   def test_maps_source_corners_onto_quad(self):
     M = quad2M(QUAD, 100, 50)
@@ -139,7 +139,7 @@ class TestQuad2M:
 
 
 class TestProjTran:
-  """``proj_tran``：画布尺寸、偏移元数据与 overflow 行为。"""
+  """`proj_tran`：画布尺寸、偏移元数据与 overflow 行为。"""
 
   def test_overflow_keeps_input_canvas(self, capsys):
     img = np.zeros((50, 100, 3), dtype=np.uint8)
@@ -167,7 +167,7 @@ class TestProjTran:
 
 
 class TestGetRandM:
-  """``get_rand_M``：随机矩阵的形状与数值有效性。"""
+  """`get_rand_M`：随机矩阵的形状与数值有效性。"""
 
   def test_shape_and_finiteness(self):
     np.random.seed(0)

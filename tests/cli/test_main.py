@@ -1,4 +1,4 @@
-"""``src/cli/main.py`` 的单元测试。"""
+"""`src/cli/main.py` 的单元测试。"""
 
 from __future__ import annotations
 

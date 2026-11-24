@@ -1,4 +1,4 @@
-"""测试集推理 + 可视化：把 GT（蓝）与预测（绿）画在同一张图上，输出到 ``dataset/log/infer``。
+"""测试集推理 + 可视化：把 GT（蓝）与预测（绿）画在同一张图上，输出到 `dataset/log/infer`。
 
 用法::
 
@@ -22,16 +22,23 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from configs import path as pathcfg
-from configs.log import UUID as _uuid
-from configs.path import SELECT_MODEL, SELECT_IMGSET, DATASET_LABEL_JSON
-from configs.training_cfg import TRAININGSET_RATIO, DROPOUT
-# _MEAN / _STD 与 DigitDataset 共用，保证自定义图片的归一化完全一致
-from src.training.dataset import (DigitDataset, collate_fn,
-                                  _MEAN as _DS_MEAN, _STD as _DS_STD)
+from configs.log import LogConfig
+from configs.path import PathConfig as pathcfg
+from configs.training_cfg import TrainingConfig
+from src.training.dataset import DigitDataset, collate_fn
 from src.training.model import CenterNetDigit
 from src.inference.infer import Inferer
 from src.utils.debug_tools import draw_quads, save_image, tensor2img
+from src.utils.image import load_tensor
+from src.utils.logging_tools import setup_logging
+
+# 本次运行标识 + 常用参数短名
+_uuid = LogConfig.UUID
+SELECT_MODEL = pathcfg.SELECT_MODEL
+SELECT_IMGSET = pathcfg.SELECT_IMGSET
+DATASET_LABEL_JSON = pathcfg.DATASET_LABEL_JSON
+TRAININGSET_RATIO = TrainingConfig.TRAININGSET_RATIO
+DROPOUT = TrainingConfig.DROPOUT
 
 # 可视化产物目录
 OUT_DIR = pathcfg.LOG_DIR / "infer" / _uuid
@@ -50,33 +57,24 @@ ds = DigitDataset(DATASET_LABEL_JSON, SELECT_IMGSET,
 dl = DataLoader(ds, batch_size=4, collate_fn=collate_fn)
 
 
-def load_image_tensor(path, img_size=(384, 384)) -> torch.Tensor:
-  """读任意图片文件 → 与 ``DigitDataset`` 完全一致的 ``(1, 3, H, W)`` 张量
+def load_image_tensor(path: Path | str,
+                     img_size: tuple[int, int] = (384, 384)) -> torch.Tensor:
+  """读任意图片文件 → 与 `DigitDataset` 完全一致的 `(1, 3, H, W)` 张量。
 
-    先转灰度再复制成 3 通道（训练集样本就是灰度 PNG），Resize / Normalize
-    的参数也从 ``dataset.py`` 拿来，避免自定义图片与训练分布不一致。
+  先转灰度再复制成 3 通道（训练集样本就是灰度 PNG），归一化参数与
+  训练 / 摄像头共用 `src.utils.image`，避免自定义图片与训练分布不一致。
 
-    Args:
-        path (Path | str): 图片路径（支持中文路径）
-        img_size (tuple[int, int]): 送进网络的 ``(H, W)``，必须与训练一致
+  Args:
+      path: 图片路径（支持中文路径）。
+      img_size: 送进网络的 `(高, 宽)`，必须与训练一致。
 
-    Returns:
-        torch.Tensor: ``(1, 3, H, W)`` float32
+  Returns:
+      `(1, 3, H, W)` float32 张量。
 
-    Raises:
-        ValueError: 图片读不出来
-    """
-  buf = np.fromfile(str(path), dtype=np.uint8)
-  gray = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
-  if gray is None:
-    raise ValueError(f"图片读取失败: {path}")
-
-  h, w = int(img_size[0]), int(img_size[1])
-  gray = cv2.resize(gray, (w, h), interpolation=cv2.INTER_LINEAR)
-  img = gray.astype(np.float32) / 255.0
-  img = np.repeat(img[None], 3, axis=0)
-  img = (img - _DS_MEAN) / _DS_STD
-  return torch.from_numpy(np.ascontiguousarray(img)).unsqueeze(0)
+  Raises:
+      ValueError: 图片读不出来。
+  """
+  return load_tensor(path, img_size, mode="gray", interp="linear")
 
 
 def visualize_files(paths, thr=0.3, topk=30, out_dir=OUT_DIR):
@@ -86,7 +84,7 @@ def visualize_files(paths, thr=0.3, topk=30, out_dir=OUT_DIR):
       paths (Sequence[Path | str]): 图片路径列表
       thr (float): 中心分数阈值
       topk (int): 每张图最多保留多少个中心
-      out_dir (Path): 输出目录，默认 ``dataset/log/infer``
+      out_dir (Path): 输出目录，默认 `dataset/log/infer`
 
   Returns:
       tuple[Path, int, int]: (输出目录, 保存张数, 检出框总数)
@@ -123,7 +121,7 @@ def resolve_index(ds, index=None, name=None) -> int:
       name (str | None): 文件名（或其中一段）
 
   Returns:
-      int: 可直接索引 ``ds`` 的下标
+      int: 可直接索引 `ds` 的下标
 
   Raises:
       ValueError: 序号越界，或没有文件名匹配
@@ -152,7 +150,7 @@ def visualize(limit=None, thr=0.3, topk=30, out_dir=OUT_DIR,
       limit (int | None): 最多处理多少张（None 表示全部）
       thr (float): 中心分数阈值
       topk (int): 每张图最多保留多少个中心
-      out_dir (Path): 输出目录，默认 ``dataset/log/infer``
+      out_dir (Path): 输出目录，默认 `dataset/log/infer`
       index (int | None): 只跑这一张（测试集内的序号，0 起）
       name (str | None): 只跑文件名包含该字符串的那一张
 
@@ -214,6 +212,8 @@ def main(argv=None):
   parser.add_argument("-p", "--image", nargs="+", default=None,
                       help="直接指定图片文件路径（可多张；只画预测，没有 GT）")
   args = parser.parse_args(argv)
+
+  setup_logging()      # src 模块只发 logger，格式 / 级别在这里定
 
   try:
     if args.image:

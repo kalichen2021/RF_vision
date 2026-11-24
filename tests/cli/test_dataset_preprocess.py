@@ -1,4 +1,4 @@
-"""``src/cli/dataset_preprocess.py`` 的单元测试。"""
+"""`src/cli/dataset_preprocess.py` 的单元测试。"""
 
 from __future__ import annotations
 

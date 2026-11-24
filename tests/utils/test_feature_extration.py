@@ -1,4 +1,4 @@
-"""``src/utils/feature_extration.py`` 的单元测试。"""
+"""`src/utils/feature_extration.py` 的单元测试。"""
 
 from __future__ import annotations
 
@@ -28,8 +28,13 @@ from utils.font_processor import font2img, get_font_path
 from utils.geometry import OffsetImg, QuadSegment, quad2M, proj_tran
 from utils.debug_tools import read_image
 from utils.typing_tools import random_choose
-from configs.path import RAW_DIR, TEST_DIR, LOG_DIR
-import configs.preprocess_cfg as ppcfg
+from configs.path import PathConfig
+from configs.preprocess_cfg import PreprocessConfig
+
+# 测试里沿用的短名字（重构后参数都在类上）
+RAW_DIR, TEST_DIR, LOG_DIR = (PathConfig.RAW_DIR, PathConfig.TEST_DIR,
+                              PathConfig.LOG_DIR)
+ppcfg = PreprocessConfig
 
 # pytestmark = pytest.mark.skip(reason="待实现：补充该模块的单元测试")
 

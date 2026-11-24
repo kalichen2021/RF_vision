@@ -4,6 +4,9 @@ from pathlib import Path
 import cv2
 from .typing_tools import is_number
 from .debug_tools import cv_show
+from .logging_tools import get_logger
+
+_logger = get_logger(__name__)
 
 FONTS_DIR = Path("C:/Windows/Fonts")
 # 覆盖无衬线 / 衬线 / 等宽 / 手写 / 粗体等常见字形
@@ -34,13 +37,13 @@ FONT_NAMES = [
 ]
 
 def get_available_fonts() -> list[str]:
-  """返回本机实际存在的字体文件名（``FONT_NAMES`` 的子集）"""
+  """返回本机实际存在的字体文件名（`FONT_NAMES` 的子集）"""
   return [name for name in FONT_NAMES if (FONTS_DIR / name).exists()]
 
 
 def get_font_path(font_name: str | int) -> str:
   if is_number(font_name):
-    print(f"font_name is a number: {font_name}")
+    _logger.debug("font_name is a number: %s", font_name)
     font_name = FONT_NAMES[int(font_name) % len(FONT_NAMES)]
   font_path = FONTS_DIR / str(font_name)
   if not Path(font_path).exists():

@@ -79,13 +79,13 @@ def tensor2img(tensor, mean=IMAGENET_MEAN, std=IMAGENET_STD):
   """把归一化后的图像张量还原成可显示 / 可保存的 BGR uint8 图
 
   Args:
-    tensor (torch.Tensor): ``(3, H, W)``；也接受 ``(1, 3, H, W)``（取第 0 个）、
-      ``(H, W)`` / ``(1, H, W)`` 灰度
+    tensor (torch.Tensor): `(3, H, W)`；也接受 `(1, 3, H, W)`（取第 0 个）、
+      `(H, W)` / `(1, H, W)` 灰度
     mean (tuple): 归一化时用的均值
     std (tuple): 归一化时用的标准差
 
   Returns:
-    np.ndarray: ``(H, W, 3)`` BGR 图（单通道输入返回 ``(H, W)`` 灰度图）
+    np.ndarray: `(H, W, 3)` BGR 图（单通道输入返回 `(H, W)` 灰度图）
   """
   t = tensor.detach().float().cpu()
   if t.ndim == 4:
@@ -110,20 +110,20 @@ def draw_quads(img, quads, labels=None, scores=None, color=(0, 255, 0),
 
   Args:
     img (np.ndarray): BGR 或灰度图
-    quads (np.ndarray | list): ``(K, 4, 2)``，顺序 [左上, 右上, 右下, 左下]
+    quads (np.ndarray | list): `(K, 4, 2)`，顺序 [左上, 右上, 右下, 左下]
     labels (list[int] | None): 每个框对应的数字类别
     scores (list[float] | None): 每个框的置信度，显示两位小数
-    color (tuple): BGR 颜色；建议 GT 用蓝 ``(255,0,0)``、预测用绿 ``(0,255,0)``
+    color (tuple): BGR 颜色；建议 GT 用蓝 `(255,0,0)`、预测用绿 `(0,255,0)`
     thickness (int): 线宽
     normalized (bool): True 时把 0~1 坐标按图像尺寸缩放，False 按像素坐标
-    tag (str): 文字前缀（如 ``"gt"`` / ``"pred"``）
+    tag (str): 文字前缀（如 `"gt"` / `"pred"`）
     font_scale (float): 字号
     inplace (bool): True 直接画在原图上（灰度图会被转成三通道新图）
-    label_pos (str): ``"top"`` 文字在框上方，``"bottom"`` 在框下方；
+    label_pos (str): `"top"` 文字在框上方，`"bottom"` 在框下方；
         同时画 GT 与预测时把其中一个放下面才能不互相遮挡
-    skip_edges (Iterable | None): 要跳过的边；既可写边序号 ``2``（0~3，第 k 条边
-        连接点 k 与点 (k+1)%4），也可写点对 ``(2, 3)``（仅相邻两点有效）。
-        例如 ``{(2, 3)}`` 表示不在第 3、4 个点之间连线
+    skip_edges (Iterable | None): 要跳过的边；既可写边序号 `2`（0~3，第 k 条边
+        连接点 k 与点 (k+1)%4），也可写点对 `(2, 3)`（仅相邻两点有效）。
+        例如 `{(2, 3)}` 表示不在第 3、4 个点之间连线
 
   Returns:
     np.ndarray: 画好的三通道 BGR 图

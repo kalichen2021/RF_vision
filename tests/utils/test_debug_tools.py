@@ -1,4 +1,4 @@
-"""``src/utils/debug_tools.py`` 的单元测试。"""
+"""`src/utils/debug_tools.py` 的单元测试。"""
 
 from __future__ import annotations
 

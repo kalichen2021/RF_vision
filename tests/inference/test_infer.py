@@ -1,4 +1,4 @@
-"""``src/inference/infer.py`` 的单元测试（不需要真实数据 / 已训练权重）。"""
+"""`src/inference/infer.py` 的单元测试（不需要真实数据 / 已训练权重）。"""
 
 from __future__ import annotations
 

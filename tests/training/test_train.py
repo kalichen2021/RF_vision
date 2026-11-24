@@ -1,4 +1,4 @@
-"""``src/training/train.py`` 的单元测试（不跑完整训练，只验冻结 / 加载逻辑）。"""
+"""`src/training/train.py` 的单元测试（不跑完整训练，只验冻结 / 加载逻辑）。"""
 
 from __future__ import annotations
 

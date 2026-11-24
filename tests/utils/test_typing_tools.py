@@ -1,4 +1,4 @@
-"""``src/utils/typing_tools.py`` 的单元测试。"""
+"""`src/utils/typing_tools.py` 的单元测试。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from utils.typing_tools import is_number, random_choose
 
 
 class TestIsNumber:
-  """``is_number`` 的类型判定"""
+  """`is_number` 的类型判定"""
 
   def test_numbers_are_numbers(self) -> None:
     for v in (42, 3.14, -7, np.float32(1.5), np.int64(3)):
@@ -22,7 +22,7 @@ class TestIsNumber:
 
 
 class TestRandomChoose:
-  """``random_choose`` 的抽样行为"""
+  """`random_choose` 的抽样行为"""
 
   def test_returns_requested_count(self) -> None:
     assert len(random_choose(list(range(10)), 4)) == 4

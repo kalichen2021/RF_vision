@@ -8,7 +8,7 @@
     python src/cli/realtime_infer.py --no-show -n 100   # 不弹窗，跑 100 帧（无显示器环境）
     python src/cli/realtime_infer.py --save             # 按 s 把画面存到 dataset/log/camera/<uuid>
 
-按键：``q`` / ``ESC`` 退出，``s`` 保存当前帧快照，``r`` / ``e`` 顺时针 / 逆时针旋转 90°
+按键：`q` / `ESC` 退出，`s` 保存当前帧快照，`r` / `e` 顺时针 / 逆时针旋转 90°
 （旋转同时作用于显示画面和送进模型的图像）。
 """
 
@@ -20,25 +20,26 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from configs import camera_cfg as ccfg
-from configs import path as pathcfg
-from configs import realtime_cfg as rtcfg
-from configs.log import UUID as _uuid
-from configs.path import SELECT_MODEL
-from configs.training_cfg import DROPOUT
+from configs.camera_cfg import CameraConfig as ccfg
+from configs.log import LogConfig
+from configs.path import PathConfig
+from configs.realtime_cfg import RealtimeConfig as rtcfg
+from configs.training_cfg import TrainingConfig
 from src.inference.infer import Inferer
 from src.serving.camera import CameraDetector
 from src.training.model import CenterNetDigit
+from src.utils.logging_tools import setup_logging
 
 
 def build_detector(args) -> CameraDetector:
   """按命令行参数组装 Inferer + CameraDetector"""
   device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
   # dropout 必须与训练时一致，否则 head 结构不同、权重加载会键名错位
-  model = CenterNetDigit(num_classes=10, dropout=DROPOUT)
-  inferrer = Inferer(model, SELECT_MODEL, device=device)
+  model = CenterNetDigit(num_classes=10, dropout=TrainingConfig.DROPOUT)
+  inferrer = Inferer(model, PathConfig.SELECT_MODEL, device=device)
 
-  save_dir = (pathcfg.LOG_DIR / "camera" / _uuid) if args.save else None
+  save_dir = ((PathConfig.LOG_DIR / "camera" / LogConfig.UUID)
+              if args.save else None)
   return CameraDetector(
       inferrer,
       index=args.camera,
@@ -76,6 +77,7 @@ def main(argv=None) -> int:
                       help="送进模型的通道模式：gray=灰度（同训练样本，默认） / rgb=彩色")
   args = parser.parse_args(argv)
 
+  setup_logging()      # src 模块只发 logger，格式 / 级别在这里定
   detector = build_detector(args)
   with detector:
     if not detector.is_open:

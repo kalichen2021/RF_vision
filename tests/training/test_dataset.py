@@ -1,4 +1,4 @@
-"""``src/training/dataset.py`` 的单元测试。"""
+"""`src/training/dataset.py` 的单元测试。"""
 from __future__ import annotations
 
 import pytest
@@ -7,15 +7,15 @@ from torch.utils.data import DataLoader
 
 from src.training.model import CenterNetDigit, build_target, total_loss
 from src.training.dataset import DigitDataset, collate_fn
-from configs.path import SELECT_IMGSET, DATASET_LABEL_JSON
+from configs.path import PathConfig
 
 
 # @pytest.fixture(scope="module")
 # def ds() -> DigitDataset:
 #   """数据集只读，模块内复用一份。  """
-#   return DigitDataset(DATASET_LABEL_JSON, SELECT_IMGSET)
+#   return DigitDataset(PathConfig.DATASET_LABEL_JSON, PathConfig.SELECT_IMGSET)
 
-ds = DigitDataset(DATASET_LABEL_JSON, SELECT_IMGSET)
+ds = DigitDataset(PathConfig.DATASET_LABEL_JSON, PathConfig.SELECT_IMGSET)
 dl = DataLoader(ds, batch_size=4, collate_fn=collate_fn)
 model = CenterNetDigit(num_classes=10)
 imgs, quads_list, digits_list = next(iter(dl))

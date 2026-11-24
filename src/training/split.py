@@ -1,6 +1,6 @@
 """按「数字四边形面积」分层划分训练集 / 验证集。
 
-直接按前 80% / 后 20% 切分会出问题：``labels.json`` 的样本是按生成顺序排列的
+直接按前 80% / 后 20% 切分会出问题：`labels.json` 的样本是按生成顺序排列的
 （环境图轮转 + 随机切分），面积大小并不均匀，前后两段很容易一个偏大一个偏小。
 这里先按每个样本的数字四边形平均面积做**分位数分层**，再在每层内部随机分配，
 保证训练 / 验证两边的面积分布（p10 / p50 / p90、最大最小值）基本一致。
@@ -17,7 +17,7 @@
     train.json   {"count": n, "samples": [...]}
     val.json     {"count": m, "samples": [...]}
 
-``DigitDataset`` 可以直接把 ``json_path`` 指到这两个文件上。
+`DigitDataset` 可以直接把 `json_path` 指到这两个文件上。
 """
 
 from __future__ import annotations
@@ -69,11 +69,11 @@ def stratified_split(samples: Sequence[dict], ratio: float = 0.8,
                      ) -> tuple[list[int], list[int]]:
   """按数字四边形面积分层划分，返回 (训练集下标, 验证集下标)
 
-  实现：把面积取 ``log1p`` 后按分位数切成 ``bins`` 层（面积跨几个数量级，
-  直接等宽分箱会让绝大多数样本挤在一层）；每层内部洗牌后按 ``ratio`` 切分。
+  实现：把面积取 `log1p` 后按分位数切成 `bins` 层（面积跨几个数量级，
+  直接等宽分箱会让绝大多数样本挤在一层）；每层内部洗牌后按 `ratio` 切分。
 
   Args:
-      samples: 样本记录列表（``labels.json`` 的 ``samples``）
+      samples: 样本记录列表（`labels.json` 的 `samples`）
       ratio: 训练集比例，0 < ratio < 1
       bins: 分位层层数（样本很少时自动减少）
       seed: 随机种子；相同种子结果可复现
@@ -131,7 +131,7 @@ def stratified_split(samples: Sequence[dict], ratio: float = 0.8,
 
 def split_dataset(labels: str | Path | dict, ratio: float = 0.8, bins: int = 8,
                   seed: int | None = None) -> dict[str, list[dict]]:
-  """读标签并返回 ``{"train": [...], "val": [...]}``（样本字典列表）"""
+  """读标签并返回 `{"train": [...], "val": [...]}`（样本字典列表）"""
   if isinstance(labels, dict):
     data = labels
   else:
@@ -146,7 +146,7 @@ def split_dataset(labels: str | Path | dict, ratio: float = 0.8, bins: int = 8,
 
 def save_splits(splits: dict[str, list[dict]], out_dir: str | Path,
                 names: tuple[str, str] = ("train", "val")) -> dict[str, Path]:
-  """把划分结果写成 ``train.json`` / ``val.json``，返回路径"""
+  """把划分结果写成 `train.json` / `val.json`，返回路径"""
   out_dir = Path(out_dir)
   out_dir.mkdir(parents=True, exist_ok=True)
   paths: dict[str, Path] = {}
@@ -161,18 +161,21 @@ def save_splits(splits: dict[str, list[dict]], out_dir: str | Path,
 
 
 def _print_report(splits: dict[str, list[dict]]) -> None:
+  from src.utils.logging_tools import get_logger
+
+  _logger = get_logger(__name__)
   """打印两边的样本数 / 数字数 / 面积分位数，便于确认分布是否对齐"""
-  print(f"\n{'split':<6}{'samples':>9}{'digits':>9}"
+  _logger.info(f"\n{'split':<6}{'samples':>9}{'digits':>9}"
         f"{'area p10':>11}{'p50':>10}{'p90':>10}{'max':>10}")
   for key, samples in splits.items():
     digits = sum(len(s.get("objects") or []) for s in samples)
     pct = area_percentiles(samples)
     if pct:
-      print(f"{key:<6}{len(samples):>9}{digits:>9}"
+      _logger.info(f"{key:<6}{len(samples):>9}{digits:>9}"
             f"{pct['p10']:>11.0f}{pct['p50']:>10.0f}"
             f"{pct['p90']:>10.0f}{pct['p100']:>10.0f}")
     else:
-      print(f"{key:<6}{len(samples):>9}{digits:>9}" + f"{'-':>41}")
+      _logger.info(f"{key:<6}{len(samples):>9}{digits:>9}" + f"{'-':>41}")
 
 
 # ---------------------------------------------------------------- CLI
@@ -192,8 +195,8 @@ def main(argv: list[str] | None = None) -> int:
   labels = args.labels
   if labels is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from configs import path as pathcfg
-    labels = pathcfg.DATASET_LABEL_JSON
+    from configs.path import PathConfig
+    labels = PathConfig.DATASET_LABEL_JSON
   labels = Path(labels)
   if not labels.exists():
     raise FileNotFoundError(f"找不到标签文件：{labels}")

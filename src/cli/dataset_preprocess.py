@@ -1,10 +1,10 @@
 """批量生成「环境 + 数字」融合样本的 CLI。
 
-流程：读环境图 → ``get_flat_quad`` 找平坦区域 → ``segment_quad`` 按 ``AREA_RANGE``
+流程：读环境图 → `get_flat_quad` 找平坦区域 → `segment_quad` 按 `AREA_RANGE`
 切出板位 → 数字做透视变换贴上去 → 按基准平面做景深失焦 → 多层灰度融合。
 
 样本多样性 = 环境图 × 字体文件 / 字重 / 画布 × 板位切分 × 数字类别：
-``SAMPLE_GEN_NUM`` 可以远多于环境图数量，同一张图会被反复使用，
+`SAMPLE_GEN_NUM` 可以远多于环境图数量，同一张图会被反复使用，
 每轮都重新随机切分板位、重新挑字体与数字。
 
 产物::
@@ -32,10 +32,18 @@ from rich.progress import (BarColumn, MofNCompleteColumn, Progress,
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from configs import path as pathcfg
-from configs import preprocess_cfg as ppcfg
-from configs.preprocess_cfg import THICKNESS_CHOICES, CANVAS_CHOICES, FONT_VARIANTS
-from configs.log import UUID as _uuid
+from configs.log import LogConfig
+from configs.path import PathConfig as pathcfg
+from configs.preprocess_cfg import PreprocessConfig as ppcfg
+from src.utils.logging_tools import get_logger, setup_logging
+
+_logger = get_logger(__name__)
+
+# 本次运行标识 + 几个常用参数的短名（函数体里少写几层前缀）
+_uuid = LogConfig.UUID
+THICKNESS_CHOICES = ppcfg.THICKNESS_CHOICES
+CANVAS_CHOICES = ppcfg.CANVAS_CHOICES
+FONT_VARIANTS = ppcfg.FONT_VARIANTS
 from src.preprocess import Preprocess
 from src.preprocess.process import build_record, save_dataset, save_sample
 from src.utils.debug_tools import read_image
@@ -49,7 +57,7 @@ from src.utils.font_processor import font2img, get_available_fonts, get_font_pat
 
 
 def build_pp() -> Preprocess:
-  """按 ``configs/preprocess_cfg.py`` 组装 Preprocess（含融合 / 失焦参数）"""
+  """按 `configs/preprocess_cfg.py` 组装 Preprocess（含融合 / 失焦参数）"""
   return Preprocess(
       ppcfg.DISTORTION, ppcfg.NORMALIZE, ppcfg.AREA_RANGE,
       ppcfg.QUADS_SELECT_RATE,
@@ -64,11 +72,11 @@ def make_font_imgs(count=None, fonts=None, variants=FONT_VARIANTS):
   """渲染一批白字黑底的数字贴图（字体 / 字重 / 画布尺寸随机）
 
   每个数字可以出多个字形变体，所以池子长度 ≠ 数字类别数：
-  第 ``i`` 张渲染的是 ``i % count``，同时把类别一并返回，
-  由调用方传给 ``Preprocess.process(..., digit_ids=...)`` 作为标签。
+  第 `i` 张渲染的是 `i % count`，同时把类别一并返回，
+  由调用方传给 `Preprocess.process(..., digit_ids=...)` 作为标签。
 
   Args:
-      count (int | None): 数字类别数量，缺省取 ``ppcfg.SAMPLE_COUNT_RATE``（需覆盖 0~9）
+      count (int | None): 数字类别数量，缺省取 `ppcfg.SAMPLE_COUNT_RATE`（需覆盖 0~9）
       fonts (list[str] | None): 候选字体文件名；缺省读本机可用字体
       variants (int): 每个数字出几个字形变体（不同字体 / 字重 / 画布）
 
@@ -98,8 +106,8 @@ def pick_env_path(env_paths, usage, failures,
                   cap=ppcfg.ENV_USE_SOFT_CAP, decay=ppcfg.ENV_USE_DECAY):
   """按使用次数加权随机选一张环境图
 
-  成功使用次数未达 ``cap`` 时权重为 1；达到后每多用一次权重乘以 ``decay``，
-  让高频图渐渐降温。读取 / 切分失败的图额外乘 ``0.25^失败次数``，避免坏图被
+  成功使用次数未达 `cap` 时权重为 1；达到后每多用一次权重乘以 `decay`，
+  让高频图渐渐降温。读取 / 切分失败的图额外乘 `0.25^失败次数`，避免坏图被
   反复抽到。
 
   Args:
@@ -124,6 +132,7 @@ def pick_env_path(env_paths, usage, failures,
 def main(argv: list[str] | None = None) -> int:
   """批量生成融合样本，返回进程退出码"""
   console = Console()
+  setup_logging()      # src 模块只发 logger，格式 / 级别在这里定
   parser = argparse.ArgumentParser(description="批量生成环境 + 数字融合样本")
   parser.add_argument("-n", "--num", type=int, default=ppcfg.SAMPLE_GEN_NUM,
                       help="生成样本数（默认 SAMPLE_GEN_NUM）")
@@ -185,7 +194,9 @@ def main(argv: list[str] | None = None) -> int:
       glyphs, digit_ids = make_font_imgs(ppcfg.SAMPLE_COUNT_RATE, fonts)
       fused, labels = pp.process(
           glyphs, env_img, show_cnt=args.show, quads=quads_cache[path],
-          digit_ids=digit_ids)
+          digit_ids=digit_ids,
+          debug_dir=(pathcfg.LOG_DIR / "preprocess" / _uuid)
+          if args.show else None)
 
       if fused is None:
         skipped += 1

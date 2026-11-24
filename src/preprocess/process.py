@@ -1,36 +1,40 @@
-from configs.log import UUID as _uuid
-from configs import preprocess_cfg as ppcfg
-from configs import path as pathcfg
-import cv2
 import json
 import random
+import sys
 import time
+from pathlib import Path
+
+import cv2
 import numpy as np
 from numpy.typing import NDArray
-from utils.feature_extration import get_flat_quad, segment_quad, fuse_scene, inset_quad
-from utils.geometry import proj_tran, quad2M
-from utils.font_processor import font2img, get_font_path
-from utils.typing_tools import is_number, random_choose
-from utils.debug_tools import cv_show, hstack_images
 
-
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from configs.log import LogConfig
+from configs.path import PathConfig as pathcfg
+from configs.preprocess_cfg import PreprocessConfig as ppcfg
+from src.utils.debug_tools import cv_show, hstack_images
+from src.utils.feature_extration import (fuse_scene, get_flat_quad, inset_quad,
+                                        segment_quad)
+from src.utils.font_processor import font2img, get_font_path
+from src.utils.geometry import proj_tran, quad2M
+from src.utils.logging_tools import get_logger
+from src.utils.typing_tools import is_number, random_choose
 
-# for log
-_save_dir = Path(pathcfg.LOG_DIR) / "preprocess" / _uuid
-_save_dir.mkdir(parents=True, exist_ok=True)
+# 本次运行的标识（用作产物目录名）
+_UUID = LogConfig.UUID
+# 只发日志不 print；调试图目录由调用方（CLI）通过 debug_dir 传入，
+# 模块被 import 时不再创建任何目录。
+_logger = get_logger(__name__)
 
 
 def build_record(name, img, labels, extra=None):
-  """构造一条样本标签记录（``image`` / ``width`` / ``height`` / extra / ``objects``）
+  """构造一条样本标签记录（`image` / `width` / `height` / extra / `objects`）
 
   Args:
       name (str): 图片文件名（含扩展名）
       img (NDArray[np.uint8]): 样本图（用它的尺寸填 width / height）
-      labels (list[dict]): ``Preprocess.process`` 返回的标签
+      labels (list[dict]): `Preprocess.process` 返回的标签
       extra (dict | None): 附加元信息（如源图名、参数快照）
 
   Returns:
@@ -52,13 +56,13 @@ def save_sample(out_dir, name, img, labels, extra=None, write_labels=True):
       out_dir (Path | str): 输出目录
       name (str): 文件名（不含扩展名）
       img (NDArray[np.uint8]): 合成图（三通道会自动转灰度）
-      labels (list[dict]): ``Preprocess.process`` 返回的标签（digit / quad / ...）
+      labels (list[dict]): `Preprocess.process` 返回的标签（digit / quad / ...）
       extra (dict | None): 附加元信息（如源图名、参数快照）
       write_labels (bool): 是否额外写一个同名 JSON；批量生成时置 False，
-          改用 ``save_dataset`` 把所有标签合成一个文件
+          改用 `save_dataset` 把所有标签合成一个文件
 
   Returns:
-      tuple[Path, Path | None]: (图片路径, 标签路径)；``write_labels=False`` 时标签路径为 None
+      tuple[Path, Path | None]: (图片路径, 标签路径)；`write_labels=False` 时标签路径为 None
   """
   out_dir = Path(out_dir)
   out_dir.mkdir(parents=True, exist_ok=True)
@@ -78,11 +82,11 @@ def save_sample(out_dir, name, img, labels, extra=None, write_labels=True):
 
 
 def save_dataset(out_dir, records, filename="labels.json"):
-  """把整批样本的标签合并写成一个 JSON（``{"count": n, "samples": [...]}``）
+  """把整批样本的标签合并写成一个 JSON（`{"count": n, "samples": [...]}`）
 
   Args:
       out_dir (Path | str): 输出目录（与图片同目录）
-      records (list[dict]): ``build_record`` 产出的记录列表
+      records (list[dict]): `build_record` 产出的记录列表
       filename (str): 合并标签文件名
 
   Returns:
@@ -168,7 +172,7 @@ class Preprocess:
     """估算各平坦区域最多能放几块板（按最小板位面积）
 
     Returns:
-        list[tuple[int, NDArray]]: ``(容量, 四边形)``，按容量从大到小排序
+        list[tuple[int, NDArray]]: `(容量, 四边形)`，按容量从大到小排序
     """
     raw_lo = float(min(self.config["area_range"]))
     capacity = []
@@ -188,7 +192,7 @@ class Preprocess:
     """按「这张图要放 target_count 个数字」分配板位
 
     每个平坦区域的容量 ≈ 区域面积 / 单块最小板位面积。按容量从大到小分配
-    名额，再让 ``segment_quad(min_cells=...)`` 切出足够多的板，避免“只想切
+    名额，再让 `segment_quad(min_cells=...)` 切出足够多的板，避免“只想切
     一块大板”导致数字个数总是偏少。
 
     Returns:
@@ -217,14 +221,14 @@ class Preprocess:
         segments.extend(best)
     return segments
 
-  def process(self, _font_imgs, env_img, show_cnt=False, quads=None,
-              digit_ids=None):
+  def process(self, _font_imgs, env_img, show_cnt: bool = False, quads=None,
+              digit_ids=None, debug_dir: Path | None = None):
     """把数字贴到环境图的平面上，返回 (灰度合成图, 标签列表)
 
     标签按“板面 → 数字内缩四边形”的顺序给出，每个元素包含：
-    ``digit``（数字类别，取自 ``digit_ids``）、``quad``（数字的透视四边形，
-    [左上, 右上, 右下, 左下]，绝对像素坐标）、``quad_norm``（归一化到 0~1）、
-    ``board_quad``（板面四边形）、``depth`` / ``sigma``（合成时用的深度与失焦量）。
+    `digit`（数字类别，取自 `digit_ids`）、`quad`（数字的透视四边形，
+    [左上, 右上, 右下, 左下]，绝对像素坐标）、`quad_norm`（归一化到 0~1）、
+    `board_quad`（板面四边形）、`depth` / `sigma`（合成时用的深度与失焦量）。
 
     Args:
         _font_imgs (list[NDArray[np.uint8]]): 白字黑底的数字贴图池
@@ -232,13 +236,13 @@ class Preprocess:
         show_cnt (bool, optional): 是否把中间结果写进日志目录。Defaults to False.
         quads (list[NDArray[np.float64]] | None, optional): 预先算好的平坦区域（可缓存复用）；
             缺省时在本次调用里检测。Defaults to None.
-        digit_ids (list[int] | None, optional): ``_font_imgs`` 每张图对应的数字类别
+        digit_ids (list[int] | None, optional): `_font_imgs` 每张图对应的数字类别
             （一个数字可以有多个字形变体）；缺省时直接用池下标，即「池下标 = 类别」。
             Defaults to None.
 
     Returns:
         tuple[NDArray[np.uint8] | None, list[dict]]: (灰度合成图, 标签)；
-        找不到可用平面时返回 ``(None, [])``
+        找不到可用平面时返回 `(None, [])`
     """
     gray = env_img if env_img.ndim == 2 else cv2.cvtColor(
         env_img, cv2.COLOR_BGR2GRAY)
@@ -253,7 +257,7 @@ class Preprocess:
     if quads is None:
       quads = get_flat_quad(gray)
     if not quads:
-      print("未检测到符合条件的平面区域")
+      _logger.debug("未检测到符合条件的平面区域")
       return None, []
 
     if self.digit_count_range is None:
@@ -262,7 +266,7 @@ class Preprocess:
                   for s in segment_quad(q, **self.config,
                                         area_scale=self.area_scale)]
       if not segments:
-        print("分割后没有符合 distortion/area 条件的四边形")
+        _logger.debug("分割后没有符合 distortion/area 条件的四边形")
         return None, []
       boxed_text_count = min(len(segments), int(
           len(segments) * self.quads_select_rate + 1))
@@ -273,7 +277,8 @@ class Preprocess:
       capacity = self._quad_capacity(quads)
       max_count = sum(cap for cap, _ in capacity)
       if max_count < k_lo:
-        print(f"板位不足：需要 {k_lo}~{k_hi} 个数字，容量只有 {max_count} 块")
+        _logger.debug("板位不足：需要 %d~%d 个数字，容量只有 %d 块",
+                      k_lo, k_hi, max_count)
         return None, []
       target_count = random.randint(k_lo, min(k_hi, max_count))
       segments = self._build_segments(quads, target_count, capacity)
@@ -281,7 +286,8 @@ class Preprocess:
         # 高目标放不下时，至少保证能满足区间下限（再不行就换图重试）
         segments = self._build_segments(quads, k_lo, capacity)
       if len(segments) < k_lo:
-        print(f"板位不足：需要 {k_lo}~{k_hi} 个数字，只能切出 {len(segments)} 块")
+        _logger.debug("板位不足：需要 %d~%d 个数字，只能切出 %d 块",
+                      k_lo, k_hi, len(segments))
         return None, []
       segments = random_choose(segments, min(target_count, len(segments)))
 
@@ -331,8 +337,10 @@ class Preprocess:
           "sigma": round(float(info["sigma"]), 3),
       })
 
-    # DEBUG: 显示板面 / 数字四边形与失焦强度
-    if show_cnt:
+    # DEBUG: 显示板面 / 数字四边形与失焦强度（debug_dir 由 CLI 传入，不传则不落盘）
+    if show_cnt and debug_dir is not None:
+      debug_dir = Path(debug_dir)
+      debug_dir.mkdir(parents=True, exist_ok=True)
       vis_env = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
       for info in infos:
         # 绿 = 基准平面（清晰），红 = 非基准平面（按 sigma 失焦）
@@ -346,9 +354,9 @@ class Preprocess:
                         int(info["offset"][1]) - 4, 10)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
       cv2.imencode('.png', vis_env)[1].tofile(
-          f"{_save_dir}/{vis_env.shape}_env_quads.png")
+          f"{debug_dir}/{vis_env.shape}_env_quads.png")
       cv2.imencode('.png', fused)[1].tofile(
-          f"{_save_dir}/{fused.shape}_env_fused.png")
+          f"{debug_dir}/{fused.shape}_env_fused.png")
 
       for i, _ in enumerate(traned_font_imgs):
         # proj_tran 的输出画布 = 目标 quad 的外接矩形, 且已把坐标平移 (0,0),
@@ -361,7 +369,7 @@ class Preprocess:
         cv2.polylines(det, [q_local], True, (0, 0, 255), 1, cv2.LINE_AA)
         _img = hstack_images([font_imgs[i], det], pad=5)
         cv2.imencode('.png', _img)[1].tofile(
-            f"{_save_dir}/{_img.shape}_projed_{i}.png")
+            f"{debug_dir}/{_img.shape}_projed_{i}.png")
 
     return fused, labels
 

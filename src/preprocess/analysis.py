@@ -1,13 +1,13 @@
 
 """数据集统计与可视化（matplotlib）。
 
-读取 ``dataset/processed/<uuid>/labels.json``（或逐样本 ``*.json``），
+读取 `dataset/processed/<uuid>/labels.json`（或逐样本 `*.json`），
 统计并可视化：
 
-- 来源数据：每个源图 ``source`` 贡献的样本数 / 数字数
+- 来源数据：每个源图 `source` 贡献的样本数 / 数字数
 - 数字：类别分布（0~9）、每张样本的数字个数
 - 四边形大小：数字四边形面积 / 长宽 / 长宽比、板面面积、板/数字面积比
-- 位置与景深：数字中心热力图、``depth`` / ``sigma`` 分布
+- 位置与景深：数字中心热力图、`depth` / `sigma` 分布
 
 用法::
 
@@ -65,6 +65,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import font_manager
 
+from src.utils.logging_tools import get_logger
+
+_logger = get_logger(__name__)
+
 
 # ---------------------------------------------------------------- 读取
 
@@ -73,15 +77,15 @@ def load_dataset(dataset_dir: str | Path) -> list[dict]:
 
   支持三种输入：
 
-  - 指向 ``labels.json`` 文件
-  - 目录下的 ``labels.json``（批量生成产物）
-  - 目录下逐样本 ``<name>.json``（``save_sample(write_labels=True)`` 产物）
+  - 指向 `labels.json` 文件
+  - 目录下的 `labels.json`（批量生成产物）
+  - 目录下逐样本 `<name>.json`（`save_sample(write_labels=True)` 产物）
 
   Args:
       dataset_dir: 数据集目录或标签文件路径
 
   Returns:
-      list[dict]: 样本记录列表（仅保留含 ``objects`` 的记录）
+      list[dict]: 样本记录列表（仅保留含 `objects` 的记录）
   """
   path = Path(dataset_dir)
   if path.is_file():
@@ -102,7 +106,7 @@ def load_dataset(dataset_dir: str | Path) -> list[dict]:
 
 
 def iter_objects(samples: Iterable[dict]):
-  """遍历所有 ``(样本, object)`` 组合"""
+  """遍历所有 `(样本, object)` 组合"""
   for sample in samples:
     for obj in sample.get("objects", []):
       yield sample, obj
@@ -265,45 +269,44 @@ class Analysis:
         "top_sources": top_sources,
     }
 
-    print(f"\n数据集: {stats['dataset_dir']}")
-    print(f"  样本数        : {stats['n_samples']}")
-    print(f"  数字总数      : {stats['n_digits']}")
-    print(f"  源图数        : {stats['n_sources']}")
-    print(f"  每样本数字数  : "
-          f"mean={stats['digits_per_sample']['mean']:.2f} "
-          f"min={stats['digits_per_sample']['min']} "
-          f"max={stats['digits_per_sample']['max']} "
-          f"median={stats['digits_per_sample']['median']:.1f}")
-    print(f"  数字类别分布  : {digit_counts}")
-    print(f"  类别均衡度    : {stats['digit_balance']:.3f} (min/max)")
+    _logger.info("\n数据集: %s", stats['dataset_dir'])
+    _logger.info("  样本数        : %s", stats['n_samples'])
+    _logger.info("  数字总数      : %s", stats['n_digits'])
+    _logger.info("  源图数        : %s", stats['n_sources'])
+    _logger.info("  每样本数字数  : mean=%.2f min=%d max=%d median=%.1f",
+                 stats['digits_per_sample']['mean'],
+                 stats['digits_per_sample']['min'],
+                 stats['digits_per_sample']['max'],
+                 stats['digits_per_sample']['median'])
+    _logger.info("  数字类别分布  : %s", digit_counts)
+    _logger.info("  类别均衡度    : %.3f (min/max)", stats['digit_balance'])
     if self.areas:
-      print(f"  数字四边形面积(pixel^2): "
-            f"min={stats['quad_area']['p0']:.0f} "
-            f"p5={stats['quad_area']['p5']:.0f} "
-            f"p50={stats['quad_area']['p50']:.0f} "
-            f"p95={stats['quad_area']['p95']:.0f} "
-            f"max={stats['quad_area']['p100']:.0f}")
-      print(f"  数字宽度/高度(pixel)  : "
-            f"w_p50={stats['quad_width']['p50']:.1f} "
-            f"h_p50={stats['quad_height']['p50']:.1f} "
-            f"aspect_p50={stats['quad_aspect']['p50']:.2f} "
-            f"aspect_p95={stats['quad_aspect']['p95']:.2f}")
+      _logger.info("  数字四边形面积(pixel^2): min=%.0f p5=%.0f p50=%.0f "
+                   "p95=%.0f max=%.0f",
+                   stats['quad_area']['p0'], stats['quad_area']['p5'],
+                   stats['quad_area']['p50'], stats['quad_area']['p95'],
+                   stats['quad_area']['p100'])
+      _logger.info("  数字宽度/高度(pixel)  : w_p50=%.1f h_p50=%.1f "
+                   "aspect_p50=%.2f aspect_p95=%.2f",
+                   stats['quad_width']['p50'], stats['quad_height']['p50'],
+                   stats['quad_aspect']['p50'], stats['quad_aspect']['p95'])
     if self.board_ratios:
-      print(f"  板面/数字面积比       : "
-            f"p5={stats['board_digit_ratio']['p5']:.2f} "
-            f"p50={stats['board_digit_ratio']['p50']:.2f} "
-            f"p95={stats['board_digit_ratio']['p95']:.2f}")
+      _logger.info("  板面/数字面积比       : p5=%.2f p50=%.2f p95=%.2f",
+                   stats['board_digit_ratio']['p5'],
+                   stats['board_digit_ratio']['p50'],
+                   stats['board_digit_ratio']['p95'])
     if self.depths:
-      print(f"  depth                 : "
-            f"min={stats['depth']['p0']:.3f} p50={stats['depth']['p50']:.3f} "
-            f"max={stats['depth']['p100']:.3f}")
+      _logger.info("  depth                 : min=%.3f p50=%.3f max=%.3f",
+                   stats['depth']['p0'], stats['depth']['p50'],
+                   stats['depth']['p100'])
     if self.sigmas:
-      print(f"  sigma                 : "
-            f"min={stats['sigma']['p0']:.2f} p50={stats['sigma']['p50']:.2f} "
-            f"max={stats['sigma']['p100']:.2f}")
-    print("  数字最多的源图:")
+      _logger.info("  sigma                 : min=%.2f p50=%.2f max=%.2f",
+                   stats['sigma']['p0'], stats['sigma']['p50'],
+                   stats['sigma']['p100'])
+    _logger.info("  数字最多的源图:")
     for src, s in top_sources:
-      print(f"    {src:<16} samples={s['samples']:<4} digits={s['digits']}")
+      _logger.info("    %-16s samples=%-4d digits=%d",
+                   src, s['samples'], s['digits'])
 
     return stats
 
@@ -504,7 +507,7 @@ class Analysis:
       out_path = Path(out_path)
       out_path.parent.mkdir(parents=True, exist_ok=True)
       fig.savefig(out_path, dpi=130, bbox_inches="tight")
-      print(f"\n总览图已保存: {out_path}")
+      _logger.info("\n总览图已保存: %s", out_path)
     if show:
       plt.show()
     else:
@@ -517,17 +520,17 @@ class Analysis:
 def _default_dataset_dir() -> Path:
   """优先 SELECT_IMGSET，否则取最新一个含 labels.json 的目录"""
   sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-  from configs import path as pathcfg
+  from configs.path import PathConfig
 
-  if (pathcfg.SELECT_IMGSET / "labels.json").exists():
-    return pathcfg.SELECT_IMGSET
+  if (PathConfig.SELECT_IMGSET / "labels.json").exists():
+    return PathConfig.SELECT_IMGSET
   candidates = sorted(
-      (p for p in pathcfg.PROCESSED_DIR.iterdir()
+      (p for p in PathConfig.PROCESSED_DIR.iterdir()
        if p.is_dir() and (p / "labels.json").exists()),
       key=lambda p: p.name)
   if not candidates:
     raise FileNotFoundError(
-        f"{pathcfg.PROCESSED_DIR} 下没有含 labels.json 的数据集")
+        f"{PathConfig.PROCESSED_DIR} 下没有含 labels.json 的数据集")
   return candidates[-1]
 
 
@@ -567,8 +570,8 @@ def main(argv: list[str] | None = None) -> int:
   out_path = args.out
   if out_path is None and not args.no_save:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from configs import path as pathcfg
-    out_path = pathcfg.LOG_DIR / "analysis" / \
+    from configs.path import PathConfig
+    out_path = PathConfig.LOG_DIR / "analysis" / \
         f"{Path(dataset_dir).name}_overview.png"
 
   analysis = Analysis(dataset_dir)

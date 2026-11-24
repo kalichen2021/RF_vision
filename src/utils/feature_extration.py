@@ -1,4 +1,4 @@
-from configs.path import RAW_DIR, LOG_DIR
+from configs.path import PathConfig
 import cv2
 import itertools
 import sys
@@ -7,6 +7,9 @@ import random
 import math
 from numpy.typing import NDArray
 from .debug_tools import cv_show, read_image
+from .logging_tools import get_logger
+
+_logger = get_logger(__name__)
 from .geometry import order_quad, QuadSegment
 from pathlib import Path
 
@@ -45,10 +48,10 @@ def _get_maxquad(cnt):
 
   策略（逐级兜底，保证大的平坦区域不会因为轮廓不够规整被整块丢掉）：
 
-  1. 用递增 epsilon 的 ``approxPolyDP``，取第一个 4 点凸多边形；
+  1. 用递增 epsilon 的 `approxPolyDP`，取第一个 4 点凸多边形；
   2. 得不到 4 点时，把轮廓粗近似成 5~12 个顶点，枚举 4 点子集取面积最大的
      凸四边形（近似「最大内接四边形」）；
-  3. 仍失败时退回 ``minAreaRect`` 的旋转外接矩形，交给 ``is_planar_quad``
+  3. 仍失败时退回 `minAreaRect` 的旋转外接矩形，交给 `is_planar_quad`
      继续做平面性筛选。
 
   Args:
@@ -130,12 +133,12 @@ def _get_mask(offset_img, offset=None):
 
   Args:
       offset_img (NDArray[np.uint8]): 前景白、背景黑的贴图；
-        若是 ``proj_tran`` 的返回值，则自带 ``offset`` 元数据
-      offset (tuple[float, float] | None): 贴图在环境图中的左上角坐标 ``(x, y)``；
-        缺省时取 ``offset_img.offset``
+        若是 `proj_tran` 的返回值，则自带 `offset` 元数据
+      offset (tuple[float, float] | None): 贴图在环境图中的左上角坐标 `(x, y)`；
+        缺省时取 `offset_img.offset`
 
   Raises:
-      ValueError: 既没有传入 offset，贴图也没有 ``offset`` 元数据
+      ValueError: 既没有传入 offset，贴图也没有 `offset` 元数据
 
   Returns:
       NDArray[np.uint8]: 与「贴图落点 + 贴图尺寸」等大的单通道掩膜
@@ -161,13 +164,13 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
                  min_cells=1):
   """按「目标面积」将四边形分割成多个四边形，通过面积 / 畸变过滤舍弃碎片。
 
-  切分数量不单独指定：先按 ``area_range`` 采样的目标面积确定格子数，
+  切分数量不单独指定：先按 `area_range` 采样的目标面积确定格子数，
   再用平坦区域总面积除以它得到行列数，所以板子要多大就切多少块。
 
-  **面积连续化**：行列数是整数，原始格子面积只能按 ``1/(cols*rows)`` 跳变
+  **面积连续化**：行列数是整数，原始格子面积只能按 `1/(cols*rows)` 跳变
   （例如 154k 的区域只能切出 154k / 38.5k …），只靠整数网格会出现「目标 80k
   却只能拿到 38k」的量化误差，大区间永远落不到实处。这里给每块板单独算一个
-  向内收缩的间隙，把面积连续调到 ``area_range`` 内，因此调大 ``area_range``
+  向内收缩的间隙，把面积连续调到 `area_range` 内，因此调大 `area_range`
   时板位面积会真正跟着变大。
 
   板子看着像正方形，实际是长宽未知的矩形：每次调用会在畸变容忍度允许的
@@ -181,14 +184,14 @@ def segment_quad(quad, distortion, normalize, area_range=(.3, 3000), gap=0.12,
     area_range (tuple): 单块板位的目标面积范围（像素²），<1 的值按占平坦区域面积的比例解释；
         同时决定切分数量。
     gap (float): 板位向内收缩的**最小**间隙 (0~1，0 为无缝)；实际间隙会在
-        ``gap``~0.45 之间逐块自适应，用来把格子面积调到目标区间。
+        `gap`~0.45 之间逐块自适应，用来把格子面积调到目标区间。
     board_aspect (float | tuple | None): 板位长宽比（宽/高）；tuple 时在区间内随机取，
         None 时取畸变容忍度允许的整个范围。Defaults to None.
     cell_jitter (float): 切割线位置的抖动幅度（0~1）；>0 时同一区域里每块板的长宽都不同。
         Defaults to 0.18.
-    area_scale (float): ``area_range`` 与板位面积的换算系数。当 ``area_range`` 描述的是
-        「数字区域」面积时传 ``(1 - 2*BOARD_MARGIN)**2``，函数内部会把板位目标放大到
-        ``area_range / area_scale``，使数字内缩后的面积正好落回区间。默认 1（描述板位）。
+    area_scale (float): `area_range` 与板位面积的换算系数。当 `area_range` 描述的是
+        「数字区域」面积时传 `(1 - 2*BOARD_MARGIN)**2`，函数内部会把板位目标放大到
+        `area_range / area_scale`，使数字内缩后的面积正好落回区间。默认 1（描述板位）。
     min_cells (int): 期望至少切出的板位数。用于「每张图放 N 个数字」——多需要几块
         就优先选更细的网格，而不是只切一块最大的板。默认 1。
   """
@@ -394,19 +397,19 @@ def is_planar_quad(gray, quad, flat_mask=None, line_angles=None, size=64,
 
   四项检查：
   1. **内部平整**：把区域正射到正方形后统计强边缘像素占比，折痕 / 跨物体都会超标；
-  2. **平坦覆盖**：四边形内落在平坦掩膜里的比例 >= ``min_flat_ratio``；
-  3. **平面拟合**：用 ax + by + c 拟合亮度，残差 RMS 超过 ``max_plane_rms``
+  2. **平坦覆盖**：四边形内落在平坦掩膜里的比例 >= `min_flat_ratio`；
+  3. **平面拟合**：用 ax + by + c 拟合亮度，残差 RMS 超过 `max_plane_rms`
      说明区域内有折痕或两块不同表面；
   4. **透视一致**：四边形的边方向应与图中检测到的长直线方向一致
-     （墙 / 柜面 / 桌面的真实棱边不会乱飘），至少 ``min_aligned_edges`` 条边
-     能在 ``angle_tol`` 内对齐；图中直线太少（< ``min_lines_for_angle_check``）
+     （墙 / 柜面 / 桌面的真实棱边不会乱飘），至少 `min_aligned_edges` 条边
+     能在 `angle_tol` 内对齐；图中直线太少（< `min_lines_for_angle_check`）
      时该项信息不足，直接跳过。
 
   Args:
       gray (NDArray[np.uint8]): 灰度环境图
       quad (NDArray[np.float64]): 四边形，(4, 2)，顺序 [左上, 右上, 右下, 左下]
       flat_mask (NDArray[np.uint8] | None): 平坦区域掩膜（255 = 平坦）
-      line_angles (NDArray[np.float64] | None): ``_line_angles`` 的输出
+      line_angles (NDArray[np.float64] | None): `_line_angles` 的输出
       size (int): 正射检查用的正方形边长
       min_flat_ratio (float): 四边形内平坦像素的最低占比
       max_edge_ratio (float): 四边形内强边缘像素允许的最大占比
@@ -468,7 +471,7 @@ def get_flat_quad(img: NDArray[np.uint8], planar_check=True):
   contours, _ = cv2.findContours(
       mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
   if not contours:
-    print("未检测到平滑区域")
+    _logger.debug("未检测到平滑区域")
     return None
 
   _img = cv2.drawContours(img.copy(), contours, -1, (0, 255, 0), 2)
@@ -494,7 +497,7 @@ def get_flat_quad(img: NDArray[np.uint8], planar_check=True):
     for q in quads:
       if is_planar_quad(gray, q, mask, angles):
         ex_keep.append(q)
-    print(f"平面性校验: 保留 {len(ex_keep)} / 剔除 {len(quads) - len(ex_keep)}")
+    _logger.debug("平面性校验: 保留 %d / 剔除 %d", len(ex_keep), len(quads) - len(ex_keep))
     quads = ex_keep
     _img = cv2.drawContours(img.copy(), np.array(
         quads, dtype=np.int32), -1, (0, 255, 0), 2) if quads else img.copy()
@@ -535,15 +538,15 @@ def pick_contrast(contrast=CONTRAST_RANGE) -> float:
 def contrast_gray(bg, contrast=0.5, polarity="any") -> int:
   """按目标对比度给数字定色：使 |数字灰度 - 背景亮度| ≈ contrast * 255
 
-  ``polarity`` 控制方向：``"down"`` 只压暗（亮板/白纸 → 黑字）、
-  ``"up"`` 只提亮（暗板 → 白字）、``"any"`` 优先朝有余量的方向取
+  `polarity` 控制方向：`"down"` 只压暗（亮板/白纸 → 黑字）、
+  `"up"` 只提亮（暗板 → 白字）、`"any"` 优先朝有余量的方向取
   （暗背景提亮、亮背景压暗）。指定方向越界时自动回退到另一侧，
   两侧都越界时取 0 / 255（此时实际对比度会被截断）。
 
   Args:
       bg (float): 贴图落点处的背景亮度 0~255
       contrast (float): 目标对比度 0~1
-      polarity (str): ``"any"`` / ``"down"`` / ``"up"``
+      polarity (str): `"any"` / `"down"` / `"up"`
 
   Returns:
       int: 数字灰度 0~255
@@ -617,7 +620,7 @@ def local_background(img_env, glyph, offset=None) -> float:
   Args:
       img_env (NDArray[np.uint8]): 环境图
       glyph (NDArray[np.uint8]): 数字贴图（用来确定落点尺寸）
-      offset (tuple[float, float] | None): 贴图左上角坐标，缺省取 ``glyph.offset``
+      offset (tuple[float, float] | None): 贴图左上角坐标，缺省取 `glyph.offset`
 
   Raises:
       ValueError: 既没有传入 offset，贴图也没有 offset 元数据
@@ -641,18 +644,18 @@ def local_background(img_env, glyph, offset=None) -> float:
 def fuse_img(img_env, glyph, offset=None, gray=None, contrast=0.5, alpha=1.0):
   """将「白字黑底」数字贴图按对比度与透明度融合进环境图（第一步：融合）
 
-  逐像素 alpha 合成：``out = env * (1 - a) + gray * a``，其中 ``a = 覆盖度 * alpha``，
+  逐像素 alpha 合成：`out = env * (1 - a) + gray * a`，其中 `a = 覆盖度 * alpha`，
   覆盖度取自贴图灰度，因此失焦后的软边会被自然保留。
 
   数字颜色不再是固定色阶，而是按「与局部背景的对比度」自动确定：
-  ``|gray - bg| ≈ contrast * 255``，保证数字在任何底色上都保持一致的可见度。
+  `|gray - bg| ≈ contrast * 255`，保证数字在任何底色上都保持一致的可见度。
 
   Args:
       img_env (NDArray[np.uint8]): 环境图，BGR 或灰度
-      glyph (NDArray[np.uint8]): 白字黑底的数字贴图，通常由 ``proj_tran`` 得到
+      glyph (NDArray[np.uint8]): 白字黑底的数字贴图，通常由 `proj_tran` 得到
       offset (tuple[float, float] | None): 贴图左上角在环境图中的绝对坐标；
-        缺省时取 ``glyph.offset``（``proj_tran`` 的返回值自带）
-      gray (int | None): 直接指定数字灰度；给定时忽略 ``contrast``
+        缺省时取 `glyph.offset`（`proj_tran` 的返回值自带）
+      gray (int | None): 直接指定数字灰度；给定时忽略 `contrast`
       contrast (float): 目标对比度 0~1，缺省 0.5，用于自动定色
       alpha (float): 融合强度 0~1，越大数字越实
 
@@ -813,7 +816,7 @@ def _defocus_mask(mask, quad, sigma, spread=0.5, base=0.0) -> NDArray[np.float32
       base (float): 基础柔边 sigma（叠加在 sigma 上）
 
   Returns:
-      NDArray[np.float32]: 0~1 的覆盖度，尺寸与 ``mask`` 一致
+      NDArray[np.float32]: 0~1 的覆盖度，尺寸与 `mask` 一致
   """
   base = max(float(base), 0.0)
   sigma = 0.0 if sigma is None else max(float(sigma), 0.0)
@@ -837,7 +840,7 @@ def draw_board(img_env, quad, tone_delta=18.0, feather=2.0,
                sigma=0.0, persp_spread=0.5, target_gray=None):
   """在环境图上渲染一块「板」：整体调色 + 失焦柔边 + 软投影
 
-  数字就贴在这块板上。板面和数字使用同一套失焦：``sigma`` 越大，
+  数字就贴在这块板上。板面和数字使用同一套失焦：`sigma` 越大，
   板边越糊（同样带四边形内部的近清远糊渐变），这样离基准平面越远的板
   连轮廓都不会是“刀切”般清晰。
 
@@ -845,7 +848,7 @@ def draw_board(img_env, quad, tone_delta=18.0, feather=2.0,
       img_env (NDArray[np.uint8]): 环境图（BGR 或灰度）
       quad (NDArray[np.float64]): 板面四边形，(4, 2)
       tone_delta (float | tuple | Sequence): 板面与背景的亮度差（正 = 更亮）；
-          仅在 ``target_gray`` 为 None 时生效
+          仅在 `target_gray` 为 None 时生效
       feather (float): 基础边缘柔化 sigma（像素）
       shadow (bool): 是否画软投影
       shadow_offset (tuple[float, float]): 投影相对板面的偏移
@@ -854,7 +857,7 @@ def draw_board(img_env, quad, tone_delta=18.0, feather=2.0,
       sigma (float): 失焦量（与数字使用同一个值），0 表示只做基础柔边
       persp_spread (float): 板内「近端 → 远端」的失焦差异比例
       target_gray (float | tuple | Sequence | None): 板面的**绝对**目标灰度；
-          给定时忽略 ``tone_delta``（相对背景的偏移）。暗环境里也能画出
+          给定时忽略 `tone_delta`（相对背景的偏移）。暗环境里也能画出
           真正的「白纸/白板」，是稳定得到「白纸黑字」的关键
 
   Returns:
@@ -898,13 +901,13 @@ def defocus_glyph(glyph, sigma, ramp=None, spread=0.5):
   """对数字贴图做高斯模糊，模拟失焦
 
   不给 ramp 时是整块均匀模糊；给了 ramp（0 = 近，1 = 远）时，按
-  「近端清晰、远端更糊」在 ``sigma * (1 ∓ spread)`` 两档之间渐变，
+  「近端清晰、远端更糊」在 `sigma * (1 ∓ spread)` 两档之间渐变，
   从而保留数字所在平面的透视关系，而不是整块一起糊掉。
 
   Args:
       glyph (NDArray[np.uint8]): 数字贴图
       sigma (float): 基准高斯 sigma（对应近端），<= 0 时原样返回
-      ramp (NDArray[np.float32] | None): ``quad_perspective_ramp`` 的输出
+      ramp (NDArray[np.float32] | None): `quad_perspective_ramp` 的输出
       spread (float): 远近两端的 sigma 差异比例，0 = 均匀失焦，0.5 = 远端 1.5 倍
 
   Returns:
@@ -953,7 +956,7 @@ def estimate_depths(quads, img_shape,
 
   Args:
       quads (list[NDArray]): 四边形列表，形状 (4, 2)，顺序 [左上, 右上, 右下, 左下]
-      img_shape (tuple): 环境图尺寸，取 ``img_shape[0]`` 作为画面高度
+      img_shape (tuple): 环境图尺寸，取 `img_shape[0]` 作为画面高度
       size_weight (float): 尺寸线索权重
       position_weight (float): 纵向位置线索权重
       taper_weight (float): 透视收缩线索权重
@@ -987,7 +990,7 @@ def pick_base_plane(depths, tol=0.12):
   以每个深度为候选中心统计成员数，成员最多者胜出；成员数相同时取更紧凑的一簇。
 
   Args:
-      depths (Sequence[float]): ``estimate_depths`` 的输出
+      depths (Sequence[float]): `estimate_depths` 的输出
       tol (float): 判定「同一平面」的深度容差
 
   Returns:
@@ -1046,28 +1049,28 @@ def fuse_scene(img_env, glyphs, segments,
 
   Args:
       img_env (NDArray[np.uint8]): 环境图，BGR 或灰度
-      glyphs (list[NDArray[np.uint8]]): 白字黑底的数字贴图（已经是 ``digit_quads`` 的透视结果）
-      segments (list[QuadSegment]): 板面四边形（提供 ``quad``）
-      contrast (float | tuple | Sequence[float]): 数字/背景对比度，见 ``pick_contrast``
-      alpha (float | tuple | Sequence[float]): 融合透明度，见 ``pick_alpha``
+      glyphs (list[NDArray[np.uint8]]): 白字黑底的数字贴图（已经是 `digit_quads` 的透视结果）
+      segments (list[QuadSegment]): 板面四边形（提供 `quad`）
+      contrast (float | tuple | Sequence[float]): 数字/背景对比度，见 `pick_contrast`
+      alpha (float | tuple | Sequence[float]): 融合透明度，见 `pick_alpha`
       base_depth (float | None): 手动指定基准平面深度；None 表示自动挑选最集中的深度簇
       plane_tol (float): 判定「同一平面」的深度容差
       defocus_strength (float): 失焦强度倍率（0 = 全部清晰）
       max_sigma (float): 单块贴图允许的最大高斯 sigma（像素）
       persp_spread (float): 单块内部「近端 → 远端」的失焦差异比例，0 = 均匀
       digit_quads (list[NDArray] | None): 数字实际占据的四边形（通常用
-        ``inset_quad`` 从板面收缩而来）；None 表示数字铺满板面
+        `inset_quad` 从板面收缩而来）；None 表示数字铺满板面
       board_tone (float | tuple | Sequence | None): 板面亮度差；None 表示不画板
       board_shadow (bool): 是否给板画软投影
       board_feather (float): 板边柔化 sigma
-      size_ratio (float): 失焦上限 = ``size_ratio * min(数字贴图宽, 高)``，
+      size_ratio (float): 失焦上限 = `size_ratio * min(数字贴图宽, 高)`，
         用于保证远处的小数字仍可辨认；0 表示不限
       board_gray (float | tuple | Sequence | None): 板面的**绝对**目标灰度区间；
-        给定时不再用 ``board_tone``（相对背景），暗环境里也能画出「白纸/白板」
+        给定时不再用 `board_tone`（相对背景），暗环境里也能画出「白纸/白板」
       board_gray_flip (float | tuple | Sequence | None): 反极性样本的板面灰度
-        （深色板）；None 表示反极性时仍用 ``board_gray``
+        （深色板）；None 表示反极性时仍用 `board_gray`
       polarity_flip_rate (float): 反极性（深板 + 亮字）样本比例，0 = 全部白纸黑字
-      min_visible (float): 融合后的最小可见对比度 ``|数字-背景|*alpha/255``；
+      min_visible (float): 融合后的最小可见对比度 `|数字-背景|*alpha/255`；
         低于该值时拉满 alpha 并提高对比度，避免「看不见但仍有标签」的噪声样本
 
   Raises:
@@ -1165,7 +1168,7 @@ if __name__ == "__main__":
   quads = get_flat_quad(img)
 
   if quads is None:
-    print("未检测到符合条件的四边形区域")
+    _logger.debug("未检测到符合条件的四边形区域")
   else:
     vis = img.copy()
     for i, quad in enumerate(quads):

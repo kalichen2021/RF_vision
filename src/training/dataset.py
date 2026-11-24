@@ -1,12 +1,24 @@
+"""训练 / 验证数据集：读 labels.json + 灰度样本图，产出 `(img, quads, digits)`。
+
+预处理统一走 `src.utils.image`（与推理、摄像头同一份实现），
+本模块只负责索引、切分和拼 batch。
+"""
+
+from __future__ import annotations
+
 import json
-
-import cv2
-import numpy as np
 from pathlib import Path
+from typing import Any, Literal
 
-# ImageNet 归一化参数（ResNet18 预训练权重就是按这个统计出的）
-_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
-_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
+import numpy as np
+
+from src.utils.image import IMAGENET_MEAN, IMAGENET_STD, read_gray, resize
+
+# ImageNet 归一化参数（与 src.utils.image 共用一份，避免各处重复定义）
+_MEAN = np.asarray(IMAGENET_MEAN, np.float32)[:, None, None]
+_STD = np.asarray(IMAGENET_STD, np.float32)[:, None, None]
+
+DatasetMode = Literal["training", "testing"]
 
 
 def collate_fn(batch):
@@ -25,17 +37,20 @@ def collate_fn(batch):
 
 
 class DigitDataset:
-  """读 ``labels.json`` + 灰度样本图，返回 ``(img[3,H,W], quad_norm[N,4,2], digit[N])``
+  """读 `labels.json` + 灰度样本图，返回 `(img[3,H,W], quad_norm[N,4,2], digit[N])`
 
   读图 / 缩放用 cv2（灰度 PNG 直接解码，再 repeat 成 3 通道），比 PIL
-  ``convert("RGB") -> BICUBIC Resize`` 快 2~3 倍；单样本实测约 7ms。
+  `convert("RGB") -> BICUBIC Resize` 快 2~3 倍；单样本实测约 7ms。
 
-  **返回值是 numpy 而不是 torch 张量**：``collate_fn`` 里再转 torch。
+  **返回值是 numpy 而不是 torch 张量**：`collate_fn` 里再转 torch。
   这样 worker 进程不需要在本模块顶层加载 torch / torchvision，能显著降低
   每个 worker 的常驻内存（曾因 NUM_WORKERS=10 时每 worker ≈1GB 把 16G 内存吃爆）。
   """
 
-  def __init__(self, json_path, img_dir, trainingset_ratio=1.0, img_size=(384, 384), convert="RGB", mode="training"):
+  def __init__(self, json_path: Path | str, img_dir: Path | str,
+               trainingset_ratio: float = 1.0,
+               img_size: tuple[int, int] = (384, 384),
+               convert: str = "RGB", mode: DatasetMode = "training") -> None:
     """_summary_
 
     Args:
@@ -81,36 +96,30 @@ class DigitDataset:
     self._img_hw = (int(img_size[0]), int(img_size[1]))
     self._channels = 3 if str(convert).upper() == "RGB" else 1
 
-  def __len__(self):
+  def __len__(self) -> int:
     # 必须返回「实际可用样本数」：self.samples 已被 trainingset_ratio 截断，
     # 用 data["count"]（原始总数）会让 DataLoader 取到越界下标 -> IndexError
     return len(self.samples)
 
   @staticmethod
-  def _slim(sample):
+  def _slim(sample: dict[str, Any]) -> dict[str, Any]:
     """只保留 image + objects 里的 digit / quad_norm"""
     return {"image": sample["image"],
             "objects": [{"digit": int(o["digit"]),
                          "quad_norm": o["quad_norm"]}
                         for o in sample.get("objects", [])]}
 
-  def __getitem__(self, idx):
+  def __getitem__(self, idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """读一张灰度样本 -> (归一化张量, quads[N,4,2], digits[N])
 
-    用 cv2 代替 PIL：样本是灰度 PNG，PIL 的 ``convert("RGB")`` 会先复制 3 份
-    再 BICUBIC 缩放；这里直接灰度解码 + ``INTER_LINEAR`` 缩放后再 repeat，
+    用 cv2 代替 PIL：样本是灰度 PNG，PIL 的 `convert("RGB")` 会先复制 3 份
+    再 BICUBIC 缩放；这里直接灰度解码 + `INTER_LINEAR` 缩放后再 repeat，
     单样本耗时约为原来的 1/2~1/3（读图是 DataLoader 的主要 CPU 开销）。
     """
     s = self.samples[idx]
     path = self.img_dir / s["image"]
-    # 用 imdecode 而不是 imread：避开 Windows 下中文路径读不出来的问题
-    buf = np.fromfile(path, dtype=np.uint8)
-    gray = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
-    if gray is None:
-      raise FileNotFoundError(f"图片读取失败: {path}")
-
-    h, w = self._img_hw
-    gray = cv2.resize(gray, (w, h), interpolation=cv2.INTER_LINEAR)
+    # 读图 / 缩放统一走 src.utils.image（read_gray 内部已处理中文路径）
+    gray = resize(read_gray(path), self._img_hw, interp="linear")
 
     img = gray.astype(np.float32) / 255.0
     if self._channels == 3:

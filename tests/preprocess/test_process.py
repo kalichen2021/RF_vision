@@ -1,4 +1,4 @@
-"""``src/preprocess/process.py`` 的单元测试。"""
+"""`src/preprocess/process.py` 的单元测试。"""
 
 from __future__ import annotations
 

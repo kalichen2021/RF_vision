@@ -1,4 +1,4 @@
-"""``configs/log.py`` 的单元测试。"""
+"""`configs/log.py` 的单元测试。"""
 
 from __future__ import annotations
 

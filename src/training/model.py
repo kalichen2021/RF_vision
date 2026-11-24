@@ -32,7 +32,7 @@ class CenterNetDigit(nn.Module):
         dropout (float): 三个 head 里的 Dropout2d 丢弃概率（0 = 不加）。
             全卷积网络没有 FC 层，所以用逐通道空间 dropout；
             只在 >0 时插入模块，因此 0 时结构与旧权重完全一致。
-            训练时用 ``configs.training_cfg.DROPOUT``，推理 / 评估必须用同一个值。
+            训练时用 `configs.training_cfg.DROPOUT`，推理 / 评估必须用同一个值。
     """
     super().__init__()
     dropout = float(dropout)
@@ -81,7 +81,7 @@ class CenterNetDigit(nn.Module):
 
     Args:
         x (torch.Tensor): Input image batch with shape
-            ``(batch_size, 3, height, width)``.
+            `(batch_size, 3, height, width)`.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Heatmap,
@@ -93,13 +93,13 @@ class CenterNetDigit(nn.Module):
 
 
 def _draw_gaussian(hm_b: torch.Tensor, ix: int, iy: int, radius: int = 2) -> None:
-  """在 (iy, ix) 这个格子上画一个高斯峰到 ``hm_b[0]``（形状 (1, fh, fw)）。
+  """在 (iy, ix) 这个格子上画一个高斯峰到 `hm_b[0]`（形状 (1, fh, fw)）。
 
-  中心格严格为 1.0（``focal_loss`` 用 ``gt.eq(1)`` 找正样本），
-  邻域按高斯衰减，给量化误差留一点容忍；重叠时取 ``maximum``，不会互相覆盖。
+  中心格严格为 1.0（`focal_loss` 用 `gt.eq(1)` 找正样本），
+  邻域按高斯衰减，给量化误差留一点容忍；重叠时取 `maximum`，不会互相覆盖。
 
   Args:
-      hm_b (torch.Tensor): 单张图的 heatmap，形状 ``(1, fh, fw)``。
+      hm_b (torch.Tensor): 单张图的 heatmap，形状 `(1, fh, fw)`。
       ix (int): 中心格列索引。
       iy (int): 中心格行索引。
       radius (int): 高斯半径（格数）。
@@ -124,12 +124,12 @@ def build_target(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
   """Construct CenterNet targets from normalized quadrilateral coordinates.
 
-  ``hm`` 用高斯渲染（中心 1.0、邻域衰减），``mask`` 仍是 0/1 的正样本位置：
+  `hm` 用高斯渲染（中心 1.0、邻域衰减），`mask` 仍是 0/1 的正样本位置：
   前者是 focal loss 的软目标，后者用来从 reg/cls 里挑出正样本格。
 
   Args:
       quads_list (Sequence[torch.Tensor]): Quadrilateral tensors for each
-          sample. Each tensor has shape ``(N, 4, 2)``.
+          sample. Each tensor has shape `(N, 4, 2)`.
       digits_list (Sequence[torch.Tensor]): Digit-label tensors for each
           sample.
       fh (int): Target feature-map height.
@@ -138,9 +138,9 @@ def build_target(
 
   Returns:
       tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-      Heatmap ``(B, 1, fh, fw)``, offset ``(B, 8, fh, fw)``,
-      classification ``(B, fh, fw)`` int64, and valid-position mask
-      ``(B, fh, fw)``.
+      Heatmap `(B, 1, fh, fw)`, offset `(B, 8, fh, fw)`,
+      classification `(B, fh, fw)` int64, and valid-position mask
+      `(B, fh, fw)`.
   """
   B = len(quads_list)
   hm = torch.zeros(B, 1, fh, fw)

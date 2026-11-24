@@ -66,10 +66,10 @@ class QuadMatrix(np.ndarray):
   """携带目标四边形信息的射影变换矩阵（3, 3）。
 
   普通 ndarray 无法附带元数据，因此用子类记录：
-  - ``dst_quad``：目标四边形。``proj_tran`` 据此把输出画布裁剪为其外接矩形，
+  - `dst_quad`：目标四边形。`proj_tran` 据此把输出画布裁剪为其外接矩形，
     输出尺寸因此与四边形尺寸一致（不再铺满整幅变换后图像的包围盒）；
-  - ``src_size``：生成矩阵时用的源矩形尺寸；为 ``None`` 表示「源尺寸待定」，
-    ``proj_tran`` 会用输入图像的宽高补全，从而把整幅图像拉伸铺满 ``dst_quad``。
+  - `src_size`：生成矩阵时用的源矩形尺寸；为 `None` 表示「源尺寸待定」，
+    `proj_tran` 会用输入图像的宽高补全，从而把整幅图像拉伸铺满 `dst_quad`。
   """
   dst_quad: NDArray[np.float64] | None = None
   src_size: tuple[int, int] | None = None
@@ -89,8 +89,8 @@ class OffsetImg(np.ndarray):
   """携带偏移量信息的图片。
 
   普通 ndarray 无法附带元数据，因此用子类记录：
-  - ``offset``：该图片在环境图中的左上角坐标 ``(x_min, y_min)``，
-    ``_get_mask`` 据此把贴图贴回整幅画布。
+  - `offset`：该图片在环境图中的左上角坐标 `(x_min, y_min)`，
+    `_get_mask` 据此把贴图贴回整幅画布。
   """
   offset: NDArray[np.uint32] | None = None
 
@@ -107,7 +107,7 @@ class OffsetImg(np.ndarray):
 class QuadSegment:
   """环境图中的一块四边形切块（坐标 + 定位信息）。
 
-  这不是图片，不应用 ``OffsetImg`` 承载 —— 后者会把坐标强转成 ``uint8``，
+  这不是图片，不应用 `OffsetImg` 承载 —— 后者会把坐标强转成 `uint8`，
   大于 255 的坐标按 256 取模后被折叠到画布左上角。
 
   Attributes:
@@ -121,12 +121,12 @@ class QuadSegment:
 
   @property
   def offset(self) -> tuple[float, float]:
-    """外接矩形左上角 ``(x_min, y_min)``，与 ``proj_tran`` 输出的 offset 语义一致。"""
+    """外接矩形左上角 `(x_min, y_min)`，与 `proj_tran` 输出的 offset 语义一致。"""
     return float(self.quad[:, 0].min()), float(self.quad[:, 1].min())
 
   @property
   def size(self) -> tuple[float, float]:
-    """外接矩形宽高 ``(w, h)``。"""
+    """外接矩形宽高 `(w, h)`。"""
     (x0, y0), (x1, y1) = self.offset, (
         float(self.quad[:, 0].max()), float(self.quad[:, 1].max()))
     return x1 - x0, y1 - y0
@@ -230,10 +230,10 @@ def proj_tran(img: NDArray[np.uint8], M: NDArray[np.floating], overflow = False,
   dst_quad : array_like, optional
     目标四边形（图像坐标系, 形状 (4, 2)）。给定时, 输出画布被裁剪为该四边形的外接矩形,
     输出尺寸因此与四边形尺寸一致; 内容仍按四边形的真实形状变换（不做二次拉伸）,
-    所以四边形之外、外接矩形之内的地方会是 0。缺省时自动取 ``M`` 上携带的目标四边形
-    （即 ``quad2M`` 的返回值）, 若该四边形还标记了「源尺寸待定」, 则把**输入图像的四个角**
+    所以四边形之外、外接矩形之内的地方会是 0。缺省时自动取 `M` 上携带的目标四边形
+    （即 `quad2M` 的返回值）, 若该四边形还标记了「源尺寸待定」, 则把**输入图像的四个角**
     对准四边形的四个角（整幅 img 拉伸铺满 quad）。既没有 dst_quad 也没有元数据时,
-    按 ``M`` 原样变换, 画布取「整幅变换后图像的包围盒」。
+    按 `M` 原样变换, 画布取「整幅变换后图像的包围盒」。
 
   Returns
   -------
@@ -284,13 +284,13 @@ def quad2M(quad, w: int = 0, h: int = 0) -> NDArray[np.float64]:
   quad : array_like
     目标四边形, 形状 (4, 2), 顺序为 [左上, 右上, 右下, 左下]
   w, h : int, optional
-    源矩形宽高。缺省 (0, 0) 表示「源尺寸待定」: 返回的矩阵会标记 ``src_size=None``,
-    ``proj_tran`` 会用输入图像的宽高补全, 于是**整幅图像拉伸铺满 quad**（四角对准四角）。
+    源矩形宽高。缺省 (0, 0) 表示「源尺寸待定」: 返回的矩阵会标记 `src_size=None`,
+    `proj_tran` 会用输入图像的宽高补全, 于是**整幅图像拉伸铺满 quad**（四角对准四角）。
 
   Returns
   -------
   NDArray[np.float64]
-    形状为 (3, 3) 的 ``QuadMatrix``, 携带 ``dst_quad``/``src_size``, ``proj_tran``
+    形状为 (3, 3) 的 `QuadMatrix`, 携带 `dst_quad`/`src_size`, `proj_tran`
     会据此把输出画布裁剪到该四边形的外接矩形, 使输出尺寸与 quad 一致。
   """
   quad = np.asarray(quad, dtype=np.float64).reshape(4, 2)

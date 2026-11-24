@@ -11,8 +11,8 @@
     python src/inference/infer.py -c models/ckpt_xxx.pt \\
         -i dataset/processed/xxx/00000_0019.png
 
-（用脚本路径而不是 ``python -m src.inference.infer``：包 ``__init__`` 已经
-导入过本模块，``-m`` 会把同一个文件跑两次并给出 RuntimeWarning。）
+（用脚本路径而不是 `python -m src.inference.infer`：包 `__init__` 已经
+导入过本模块，`-m` 会把同一个文件跑两次并给出 RuntimeWarning。）
 """
 
 from __future__ import annotations
@@ -29,10 +29,13 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.training.model import CenterNetDigit
+from src.utils.image import IMAGENET_MEAN, IMAGENET_STD, load_tensor
+from src.utils.logging_tools import get_logger
 
-# 与 DigitDataset 保持一致的 ImageNet 归一化
-_MEAN = [0.485, 0.456, 0.406]
-_STD = [0.229, 0.224, 0.225]
+# 与 DigitDataset / 摄像头共用同一套 ImageNet 归一化参数
+_MEAN = list(IMAGENET_MEAN)
+_STD = list(IMAGENET_STD)
+_logger = get_logger(__name__)
 
 
 def build_transform(img_size=(384, 384)):
@@ -51,24 +54,24 @@ def build_transform(img_size=(384, 384)):
   ])
 
 
-def load_image(path, img_size=(384, 384)):
-  """读一张图并转成 ``(1, 3, H, W)`` 张量（还没搬到 device）
+def load_image(path: str | Path, img_size: tuple[int, int] = (384, 384)) -> torch.Tensor:
+  """读一张图并转成 `(1, 3, H, W)` 张量（还没搬到 device）。
 
   Args:
-      path (str | Path): 图片路径
-      img_size (tuple[int, int]): 目标输入尺寸
+      path: 图片路径。
+      img_size: 目标输入尺寸 `(高, 宽)`。
 
   Returns:
-      torch.Tensor: ``(1, 3, H, W)``
+      `(1, 3, H, W)` float32 张量。
   """
-  return build_transform(img_size)(Image.open(path).convert("RGB")).unsqueeze(0)
+  return load_tensor(path, img_size, mode="rgb", interp="linear")
 
 
 def _strip_head_dropout(model) -> bool:
   """把三个 head 里的 Dropout2d 去掉（用于兼容「无 dropout 结构」的旧权重）
 
-  Dropout 在 ``eval()`` 下是恒等映射，去掉它不改变推理结果，
-  但能让 ``nn.Sequential`` 的层序号回到旧权重的编号。
+  Dropout 在 `eval()` 下是恒等映射，去掉它不改变推理结果，
+  但能让 `nn.Sequential` 的层序号回到旧权重的编号。
 
   Returns:
       bool: 是否真的移除过任何层（False 表示模型本来就没有 Dropout）
@@ -90,8 +93,8 @@ class Inferer:
 
   Args:
       model (CenterNetDigit): 待加载权重的模型实例（结构需与训练时一致）
-      ckpt_path (str | Path): 权重文件；兼容 ``state_dict``、
-          ``{"state_dict": ...}``、整个 ``nn.Module`` 三种存法
+      ckpt_path (str | Path): 权重文件；兼容 `state_dict`、
+          `{"state_dict": ...}`、整个 `nn.Module` 三种存法
       device (str | torch.device): 推理设备，默认 CPU
       num_classes (int): 分类头类别数，必须与训练时一致
       img_size (tuple[int, int]): 网络输入尺寸，必须与训练时一致
@@ -110,9 +113,9 @@ class Inferer:
     """把 checkpoint 还原成可用的模型
 
     兼容三种存法：
-      1. ``{"state_dict": ..., "num_classes": ..., "dropout": ...}``（新版 Trainer）
-      2. 裸 ``state_dict``（旧版权重，没有结构元信息）
-      3. 整个 ``nn.Module``
+      1. `{"state_dict": ..., "num_classes": ..., "dropout": ...}`（新版 Trainer）
+      2. 裸 `state_dict`（旧版权重，没有结构元信息）
+      3. 整个 `nn.Module`
 
     元信息里的 dropout 会与传入的模型比对：不一致且权重不带 Dropout 时
     自动摘掉 head 里的 Dropout（eval 下等价），否则直接报错提示传对参数。
@@ -136,7 +139,7 @@ class Inferer:
     if ckpt_dropout is not None and model_dropout is not None \
             and float(ckpt_dropout) != float(model_dropout):
       if float(ckpt_dropout) == 0.0 and _strip_head_dropout(model):
-        print(f"提示：权重是用 dropout=0 训练的，已移除 head 中的 Dropout 后加载")
+        _logger.info("权重是用 dropout=0 训练的，已移除 head 中的 Dropout 后加载")
       else:
         raise ValueError(
             f"权重是用 dropout={ckpt_dropout} 训练的，但传入的模型是 "
@@ -152,8 +155,8 @@ class Inferer:
       if not _strip_head_dropout(model):
         raise
       model.load_state_dict(state)
-      print("提示：该权重是在「不带 Dropout2d」的结构下训练的，"
-            "已自动移除 head 中的 Dropout 后加载")
+      _logger.info("该权重是在「不带 Dropout2d」的结构下训练的，"
+                   "已自动移除 head 中的 Dropout 后加载")
     return model
 
   @staticmethod
@@ -162,18 +165,18 @@ class Inferer:
     """把三个 head 的输出解码成数字框。
 
     Args:
-        hm_p (torch.Tensor): 中心热度 ``(B, 1, h, w)``（已过 sigmoid）
-        reg_p (torch.Tensor): 中心到 4 个角的偏移 ``(B, 8, h, w)``，单位是 feature 格；
-            与 ``build_target`` 的 ``reg_t`` 同一套定义
-        cls_p (torch.Tensor): 分类 logits ``(B, C, h, w)``
+        hm_p (torch.Tensor): 中心热度 `(B, 1, h, w)`（已过 sigmoid）
+        reg_p (torch.Tensor): 中心到 4 个角的偏移 `(B, 8, h, w)`，单位是 feature 格；
+            与 `build_target` 的 `reg_t` 同一套定义
+        cls_p (torch.Tensor): 分类 logits `(B, C, h, w)`
         thr (float): 中心分数阈值
         topk (int): 每张图最多保留多少个中心
 
     Returns:
         list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]: 每张图的
-        ``(pts_norm (K,4,2), digits (K,), scores (K,))``，按置信度降序，
+        `(pts_norm (K,4,2), digits (K,), scores (K,))`，按置信度降序，
         角点顺序为 [左上, 右上, 右下, 左下]、坐标归一化到 0~1；
-        一个都没检出时返回 ``(0,4,2)`` / ``(0,)`` / ``(0,)`` 空张量
+        一个都没检出时返回 `(0,4,2)` / `(0,)` / `(0,)` 空张量
     """
     if hm_p.ndim != 4 or hm_p.shape[1] != 1:
       raise ValueError(f"hm_p 应为 (B,1,h,w)，收到 {tuple(hm_p.shape)}")
@@ -207,13 +210,13 @@ class Inferer:
     return results
 
   def infer(self, imgs):
-    """只做前向，返回 ``(hm_p, reg_p, cls_p)`` 三张原始输出图"""
+    """只做前向，返回 `(hm_p, reg_p, cls_p)` 三张原始输出图"""
     self.model.eval()
     with torch.no_grad():
       return self.model(imgs.to(self.device))
     
   def predict_testing(self, dl):
-    """按 dataloader 批量推理，返回 ``(pts_norm, digits, scores)`` 三张列表"""
+    """按 dataloader 批量推理，返回 `(pts_norm, digits, scores)` 三张列表"""
     self.model.eval()
     results = []
     with torch.no_grad():
@@ -225,7 +228,7 @@ class Inferer:
     """前向 + 解码，返回结构与 :meth:`decode` 相同
 
     Args:
-        imgs (torch.Tensor): ``(B, 3, H, W)``，需已按训练方式归一化
+        imgs (torch.Tensor): `(B, 3, H, W)`，需已按训练方式归一化
         thr (float): 中心分数阈值
         topk (int): 每张图最多保留多少个中心
     """
@@ -254,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
   inf = Inferer(CenterNetDigit(num_classes=10), args.ckpt, device=args.device)
   for path, (pts, digits, scores) in zip(
       args.image, inf.predict_images(args.image, args.thr, args.topk)):
-    print(f"{Path(path).name}: 检出 {len(digits)} 个数字")
+    _logger.info("%s: 检出 %d 个数字", Path(path).name, len(digits))
     for p, d, s in zip(pts.tolist(), digits.tolist(), scores.tolist()):
       corners = " ".join(f"({x:.3f},{y:.3f})" for x, y in p)
       print(f"  digit={d} score={s:.3f} {corners}")

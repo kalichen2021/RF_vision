@@ -1,4 +1,4 @@
-"""``src/training/split.py`` 的单元测试。"""
+"""`src/training/split.py` 的单元测试。"""
 
 from __future__ import annotations
 

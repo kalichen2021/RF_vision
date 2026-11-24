@@ -34,15 +34,15 @@ def _worker_init(_worker_id: int) -> None:
 def build_loaders(batch_size=None, num_workers=None):
   """构造训练 / 验证 DataLoader
 
-  关键在 ``num_workers`` / ``pin_memory`` / ``prefetch_factor``：
+  关键在 `num_workers` / `pin_memory` / `prefetch_factor`：
   不配子进程时读图、Resize、Normalize 全在主进程里串行做，GPU 每个 batch
   都要等 CPU 喂数据（表现为 CPU 90%、GPU 20%、显存用不满）。
   """
   import torch
   from torch.utils.data import DataLoader
 
-  from configs import training_cfg as tc
-  from configs.path import DATASET_LABEL_JSON, SELECT_IMGSET
+  from configs.path import PathConfig
+  from configs.training_cfg import TrainingConfig as tc
   from src.training.dataset import DigitDataset, collate_fn
 
   batch_size = tc.BATCH_SIZE if batch_size is None else int(batch_size)
@@ -65,11 +65,12 @@ def build_loaders(batch_size=None, num_workers=None):
       worker_init_fn=_worker_init if num_workers > 0 else None,
   )
 
-  ds = DigitDataset(DATASET_LABEL_JSON, SELECT_IMGSET, tc.TRAININGSET_RATIO)
+  ds = DigitDataset(PathConfig.DATASET_LABEL_JSON, PathConfig.SELECT_IMGSET,
+                    tc.TRAININGSET_RATIO)
   dl = DataLoader(ds, batch_size=batch_size, shuffle=True,
                   collate_fn=collate_fn, **common)
 
-  ds_test = DigitDataset(DATASET_LABEL_JSON, SELECT_IMGSET,
+  ds_test = DigitDataset(PathConfig.DATASET_LABEL_JSON, PathConfig.SELECT_IMGSET,
                          tc.TRAININGSET_RATIO, mode="testing")
   dl_test = DataLoader(ds_test, batch_size=batch_size, shuffle=False,
                        collate_fn=collate_fn, **common)
@@ -83,7 +84,7 @@ def build_opt(model, lr=None):
   冻结/解冻后旧 optimizer 的 param_group 已经不合适了。
   """
   import torch
-  from configs import training_cfg as tc
+  from configs.training_cfg import TrainingConfig as tc
 
   lr = tc.LR_HEAD if lr is None else float(lr)
   params = [p for p in model.parameters() if p.requires_grad]
@@ -92,7 +93,7 @@ def build_opt(model, lr=None):
 
 def make_trainer(epochs: int, ckpt_path, dev: str):
   """每阶段一个 Trainer（每轮会在测试集上验证，best / 早停看 val loss）"""
-  from configs import training_cfg as tc
+  from configs.training_cfg import TrainingConfig as tc
   from src.training.train import Trainer
 
   return Trainer(epochs=epochs, device=dev,
@@ -108,7 +109,7 @@ def make_scheduler(opt):
     而是“不见好才降”，所以训练中后期的 loss 平台不再被学习率结构性地造成。
   """
   import torch
-  from configs import training_cfg as tc
+  from configs.training_cfg import TrainingConfig as tc
 
   return torch.optim.lr_scheduler.ReduceLROnPlateau(
       opt, mode="min", factor=float(tc.LR_PLATEAU_FACTOR),
@@ -118,10 +119,14 @@ def make_scheduler(opt):
 def main() -> None:
   import torch
 
-  from configs import training_cfg as tc
-  from configs.log import UUID as _uuid
-  from configs.path import MODELS_DIR, SELECT_IMGSET
+  from configs.log import LogConfig
+  from configs.path import PathConfig
+  from configs.training_cfg import TrainingConfig as tc
   from src.training.model import CenterNetDigit
+  from src.utils.logging_tools import setup_logging
+
+  # 控制台输出的格式 / 级别统一在这里配置（src 模块内部只发 logger）
+  setup_logging()
 
   # torch 默认按逻辑核数开线程（这台机器是 14），会和 DataLoader 抢 CPU
   if tc.TORCH_NUM_THREADS:
@@ -130,13 +135,13 @@ def main() -> None:
   # DataLoader 必须在 main 里构造（Windows spawn 会 import 本模块）
   ds, dl, ds_test, dl_test = build_loaders()
   model = CenterNetDigit(num_classes=10, dropout=tc.DROPOUT)
-  ckpt_path = MODELS_DIR / f"ckpt_{_uuid}.pt"
+  ckpt_path = PathConfig.MODELS_DIR / f"ckpt_{LogConfig.UUID}.pt"
 
   print(f"使用设备: {dev} | DataLoader workers={tc.NUM_WORKERS} | "
         f"batch={tc.BATCH_SIZE} | amp={tc.USE_AMP} | "
         f"torch_threads={torch.get_num_threads()}")
-  print(f"使用数据集：{SELECT_IMGSET} | {len(ds)} + {len(ds_test)} "
-        f"= {len(ds) + len(ds_test)} 张")
+  print(f"使用数据集：{PathConfig.SELECT_IMGSET}"
+        f" | {len(ds)} + {len(ds_test)} = {len(ds) + len(ds_test)} 张")
 
   # 验证集：每个 epoch 都跑一次（best / 早停 / 降 lr 都盯它）
   val_dl = dl_test if tc.VALIDATE_EVERY_EPOCH else None
@@ -160,8 +165,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-  from configs import training_cfg as tc
-  from configs.path import SELECT_MODEL
+  from configs.path import PathConfig
+  from configs.training_cfg import TrainingConfig as tc
   from src.training.model import CenterNetDigit
 
   # model = CenterNetDigit(num_classes=10, dropout=tc.DROPOUT)
