@@ -52,7 +52,9 @@ def build_record(name: str, img: NDArray[np.uint8], labels: list[dict],
 
 def save_sample(out_dir: Path | str, name: str, img: NDArray[np.uint8],
                 labels: list[dict], extra: dict | None = None,
-                write_labels: bool = True) -> tuple[Path, Path | None]:
+                write_labels: bool = True,
+                size: tuple[int, int] | None = None,
+                ext: str = "png") -> tuple[Path, Path | None]:
   """保存一个训练样本：灰度 PNG（可选：单个 JSON 标签）
 
   Args:
@@ -70,8 +72,15 @@ def save_sample(out_dir: Path | str, name: str, img: NDArray[np.uint8],
   out_dir = Path(out_dir)
   out_dir.mkdir(parents=True, exist_ok=True)
   gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-  img_path = out_dir / f"{name}.png"
-  cv2.imencode(".png", gray)[1].tofile(str(img_path))
+  if size is not None:
+    # cv2.resize 的尺寸顺序是 (宽, 高)；已经等于目标尺寸就不重复缩放
+    target = (int(size[1]), int(size[0]))
+    if (gray.shape[1], gray.shape[0]) != target:
+      gray = cv2.resize(gray, target, interpolation=cv2.INTER_AREA)
+  ext = str(ext).lower().lstrip(".")
+  img_path = out_dir / f"{name}.{ext}"
+  params = [cv2.IMWRITE_JPEG_QUALITY, 95] if ext in ("jpg", "jpeg") else []
+  cv2.imencode(f".{ext}", gray, params)[1].tofile(str(img_path))
 
   lbl_path = None
   if write_labels:
@@ -120,7 +129,7 @@ class Preprocess:
                base_depth: float | None = None,
                plane_tol: float = ppcfg.PLANE_TOL,
                board_tone: tuple[float, float] = ppcfg.BOARD_TONE,
-               board_margin: float = ppcfg.BOARD_MARGIN,
+               board_margin: float | tuple[float, float] = ppcfg.BOARD_MARGIN,
                board_shadow: bool = ppcfg.BOARD_SHADOW,
                defocus_size_ratio: float = ppcfg.DEFOCUS_SIZE_RATIO,
                digit_count_range: tuple[int, int] | None = ppcfg.SAMPLE_DIGIT_RANGE,
@@ -162,9 +171,26 @@ class Preprocess:
     self.board_gray_flip = board_gray_flip
     self.polarity_flip_rate = float(polarity_flip_rate)
     self.min_visible_contrast = float(min_visible_contrast)
-    # AREA_RANGE 描述的是「数字四边形」面积；板位要比它大 (1-2*margin)^-2 倍，
-    # 这样 inset_quad 内缩之后，数字面积正好落在 AREA_RANGE 里
-    self.area_scale = (1.0 - 2.0 * float(board_margin)) ** 2
+    # 数字内缩比例：固定值或 (lo, hi) 区间；每张图抽一档，同一张图内保持一致
+    if isinstance(board_margin, (int, float)):
+      m_lo = m_hi = float(board_margin)
+    else:
+      m_lo, m_hi = sorted(float(v) for v in board_margin)
+    self.margin_range = (max(0.0, m_lo), min(0.45, m_hi))
+    self.board_margin = board_margin
+    # AREA_RANGE 描述的是「板位（板面）」面积，不再随留边放大：
+    # 留边只决定数字在板内的大小（数字面积 = 板位面积 × (1-2*margin)²），
+    # 这样换留边不会把板撑大、不会把数字个数稀释掉。
+    self.area_scale = 1.0
+
+  def _pick_margin(self) -> float:
+    """每张图抽一个数字内缩比例（同一张图内所有数字共用）。
+
+    Returns:
+        内缩比例，已在 ``margin_range`` 范围内；区间退化时直接返回该值。
+    """
+    lo, hi = self.margin_range
+    return lo if hi <= lo else random.uniform(lo, hi)
 
   def detect_quads(self, env_img: NDArray[np.uint8]) -> list[NDArray[np.float64]]:
     """检测环境图上的平坦区域（同一张图结果确定，批量生成时可缓存复用）
@@ -179,7 +205,8 @@ class Preprocess:
         env_img, cv2.COLOR_BGR2GRAY)
     return get_flat_quad(gray)
 
-  def _quad_capacity(self, quads: list[NDArray[np.float64]]
+  def _quad_capacity(self, quads: list[NDArray[np.float64]],
+                     area_scale: float | None = None
                      ) -> list[tuple[int, NDArray[np.float64]]]:
     """估算各平坦区域最多能放几块板（按最小板位面积）
 
@@ -187,11 +214,11 @@ class Preprocess:
         list[tuple[int, NDArray]]: `(容量, 四边形)`，按容量从大到小排序
     """
     raw_lo = float(min(self.config["area_range"]))
+    scale = self.area_scale if area_scale is None else float(area_scale)
     capacity = []
     for q in quads:
       quad_area = abs(cv2.contourArea(np.asarray(q, dtype=np.float32)))
-      board_lo = (raw_lo * quad_area if raw_lo < 1 else raw_lo) \
-          / self.area_scale
+      board_lo = (raw_lo * quad_area if raw_lo < 1 else raw_lo) / scale
       # 最小 gap(0.12) 会再吃掉约 23% 面积，再留 10% 给切割线抖动
       footprint = max(board_lo, 1.0) / ((1 - 0.12) ** 2)
       cap = int(quad_area // max(footprint * 1.1, 1.0))
@@ -202,7 +229,8 @@ class Preprocess:
 
   def _build_segments(self, quads: list[NDArray[np.float64]],
                       target_count: int,
-                      capacity: list[tuple[int, NDArray[np.float64]]] | None = None
+                      capacity: list[tuple[int, NDArray[np.float64]]] | None = None,
+                      area_scale: float | None = None
                       ) -> list:
     """按「这张图要放 target_count 个数字」分配板位
 
@@ -214,7 +242,8 @@ class Preprocess:
         list[QuadSegment]: 切出的板位（数量可能多于或少于 target_count）
     """
     if capacity is None:
-      capacity = self._quad_capacity(quads)
+      capacity = self._quad_capacity(quads, area_scale)
+    scale = self.area_scale if area_scale is None else float(area_scale)
 
     segments = []
     for cap, q in capacity:
@@ -226,7 +255,7 @@ class Preprocess:
       # 避免一次抽到偏粗的网格导致「只要 6 块却只切出 3 块」
       best: list = []
       for _ in range(3 if want > 1 else 1):
-        got = segment_quad(q, **self.config, area_scale=self.area_scale,
+        got = segment_quad(q, **self.config, area_scale=scale,
                            min_cells=want)
         if len(got) > len(best):
           best = got
@@ -280,11 +309,15 @@ class Preprocess:
       _logger.debug("未检测到符合条件的平面区域")
       return None, []
 
+    # 每张图抽一档内缩比例：同一张图的板边留白一致；板位大小不受留边影响
+    margin = self._pick_margin()
+    area_scale = 1.0
+
     if self.digit_count_range is None:
       # 旧逻辑：按面积切出全部板位，再按比例挑一部分
       segments = [s for q in quads
                   for s in segment_quad(q, **self.config,
-                                        area_scale=self.area_scale)]
+                                        area_scale=area_scale)]
       if not segments:
         _logger.debug("分割后没有符合 distortion/area 条件的四边形")
         return None, []
@@ -294,17 +327,17 @@ class Preprocess:
     else:
       # 新逻辑：先按容量算这张图最多能放几个，再在可行区间内取目标个数
       k_lo, k_hi = self.digit_count_range
-      capacity = self._quad_capacity(quads)
+      capacity = self._quad_capacity(quads, area_scale)
       max_count = sum(cap for cap, _ in capacity)
       if max_count < k_lo:
         _logger.debug("板位不足：需要 %d~%d 个数字，容量只有 %d 块",
                       k_lo, k_hi, max_count)
         return None, []
       target_count = random.randint(k_lo, min(k_hi, max_count))
-      segments = self._build_segments(quads, target_count, capacity)
+      segments = self._build_segments(quads, target_count, capacity, area_scale)
       if len(segments) < k_lo:
         # 高目标放不下时，至少保证能满足区间下限（再不行就换图重试）
-        segments = self._build_segments(quads, k_lo, capacity)
+        segments = self._build_segments(quads, k_lo, capacity, area_scale)
       if len(segments) < k_lo:
         _logger.debug("板位不足：需要 %d~%d 个数字，只能切出 %d 块",
                       k_lo, k_hi, len(segments))
@@ -316,8 +349,8 @@ class Preprocess:
     font_idx = random_choose(list(range(len(_font_imgs))), boxed_text_count)
     font_imgs = [_font_imgs[i] for i in font_idx]
 
-    # 数字贴在板面内部（留边），并按内缩四边形做透视变换
-    digit_quads = [inset_quad(seg.quad, self.board_margin) for seg in segments]
+    # 数字贴在板面内部（按本图抽到的 margin 留边），并按内缩四边形做透视变换
+    digit_quads = [inset_quad(seg.quad, margin) for seg in segments]
     traned_font_imgs = [
         np.array(proj_tran(_img, quad2M(dq, *_img.shape)))
         for _img, dq in zip(font_imgs, digit_quads)

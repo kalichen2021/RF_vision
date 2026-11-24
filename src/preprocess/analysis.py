@@ -61,7 +61,8 @@ from typing import Iterable, Iterator, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import font_manager
+
+from src.utils.plotting import setup_cjk_font
 
 
 # ---------------------------------------------------------------- 读取
@@ -474,11 +475,9 @@ class Analysis:
 
 
 def _setup_cjk_font() -> None:
-  """尽量启用中文字体，避免标题显示为方块"""
-  prefer = ["Microsoft YaHei", "SimHei", "Noto Sans CJK SC",
-            "PingFang SC", "WenQuanYi Zen Hei"]
-  available = {f.name for f in font_manager.fontManager.ttflist}
-  picked = [name for name in prefer if name in available]
-  if picked:
-    plt.rcParams["font.sans-serif"] = picked + ["DejaVu Sans"]
-  plt.rcParams["axes.unicode_minus"] = False
+  """尽量启用中文字体，避免标题显示为方块。
+
+  实现在 `src.utils.plotting.setup_cjk_font`（训练日志绘图也用它），
+  这里保留薄封装以免调用点全改。
+  """
+  setup_cjk_font()

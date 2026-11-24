@@ -23,10 +23,11 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from configs.infer_cfg import InferConfig
 from configs.log import LogConfig
 from configs.path import PathConfig as pathcfg
 from configs.training_cfg import TrainingConfig
-from src.training.dataset import DigitDataset, collate_fn
+from src.training.dataset import DigitDataset, batch_to_torch, collate_fn
 from src.training.model import CenterNetDigit
 from src.inference.infer import Inferer
 from src.utils.debug_tools import draw_quads, save_image, tensor2img
@@ -75,7 +76,8 @@ def load_image_tensor(path: Path | str,
   Raises:
       ValueError: 图片读不出来。
   """
-  return load_tensor(path, img_size, mode="gray", interp="linear")
+  return load_tensor(path, img_size, mode="gray", interp="linear",
+                     crop="center" if InferConfig.CROP_SQUARE else "none")
 
 
 def visualize_files(paths: Sequence[Path | str], thr: float = 0.3,
@@ -176,7 +178,8 @@ def visualize(limit: int | None = None, thr: float = 0.3, topk: int = 30,
     offsets = None
 
   saved, n_det = 0, 0
-  for bi, (imgs, gt_quads, gt_digits) in enumerate(batches):
+  for bi, batch in enumerate(batches):
+    imgs, gt_quads, gt_digits = batch_to_torch(batch)   # numpy -> torch
     base = offsets[bi] if offsets is not None else bi * dl.batch_size
     preds = inferrer.predict(imgs, thr=thr, topk=topk)   # predict 内部已 no_grad()
     for b, (pts, digits, scores) in enumerate(preds):

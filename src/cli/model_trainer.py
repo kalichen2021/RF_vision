@@ -21,9 +21,9 @@ def get_device() -> str:
 def _worker_init(_worker_id: int) -> None:
   """限制 worker 内部线程数，避免和主进程 / 其他 worker 抢 CPU 核"""
   import torch
-  from configs.training_cfg import WORKER_TORCH_THREADS
+  from configs.training_cfg import TrainingConfig
 
-  torch.set_num_threads(max(1, int(WORKER_TORCH_THREADS)))
+  torch.set_num_threads(max(1, int(TrainingConfig.WORKER_TORCH_THREADS)))
   try:                       # OpenCV 也会自己开线程池
     import cv2
     cv2.setNumThreads(0)
@@ -53,10 +53,11 @@ def build_loaders(batch_size: int | None = None,
   pin = bool(tc.PIN_MEMORY and torch.cuda.is_available())
   prefetch = int(tc.PREFETCH_FACTOR)
   if num_workers > 0:
-    # 排队上限保护：float32 张量 = batch*3*384*384*4 字节，batch=32 时约 57MB，
-    # workers * prefetch 个队列很容易吃掉 ~1GB（再叠一份 pinned 拷贝就翻倍）
+    # 排队上限保护：float32 张量 = batch*3*384*384*4 字节，batch=48 时约 85MB，
+    # workers * prefetch 个队列 + 拷贝会吃掉 1~3GB，这里给到 ~3GB 预算，
+    # 保证 NUM_WORKERS=10 时 PREFETCH_FACTOR=2 不会被默默压成 1
     per_batch = batch_size * 3 * 384 * 384 * 4
-    budget = max(1, int(1.2e9 // max(per_batch, 1)))
+    budget = max(1, int(3.0e9 // max(per_batch, 1)))
     prefetch = max(1, min(prefetch, budget // num_workers))
   common = dict(
       num_workers=num_workers,
@@ -93,15 +94,18 @@ def build_opt(model: "torch.nn.Module", lr: float | None = None
   return torch.optim.Adam(params, lr=lr)
 
 
-def make_trainer(epochs: int, ckpt_path: str | Path, dev: str) -> "Trainer":
-  """每阶段一个 Trainer（每轮会在测试集上验证，best / 早停看 val loss）"""
+def make_trainer(epochs: int, ckpt_path: str | Path, dev: str,
+                 records_path: str | Path | None = None,
+                 val_interval: int = 1) -> "Trainer":
+  """每阶段一个 Trainer（每 val_interval 轮验证一次，结果逐轮写 JSON）"""
   from configs.training_cfg import TrainingConfig as tc
   from src.training.train import Trainer
 
   return Trainer(epochs=epochs, device=dev,
                  early_stopping_patience=tc.EARLY_STOPPING_PATIENCE,
                  ckpt_path=ckpt_path, use_amp=tc.USE_AMP,
-                 cudnn_benchmark=tc.CUDNN_BENCHMARK)
+                 cudnn_benchmark=tc.CUDNN_BENCHMARK,
+                 val_interval=val_interval, records_path=records_path)
 
 
 def make_scheduler(opt: "torch.optim.Optimizer"
@@ -146,17 +150,29 @@ def main() -> None:
   print(f"使用数据集：{PathConfig.SELECT_IMGSET}"
         f" | {len(ds)} + {len(ds_test)} = {len(ds) + len(ds_test)} 张")
 
-  # 验证集：每个 epoch 都跑一次（best / 早停 / 降 lr 都盯它）
+  # 验证集：每 VAL_INTERVAL 轮跑一次（best / 早停 / 降 lr 都盯它）
   val_dl = dl_test if tc.VALIDATE_EVERY_EPOCH else None
+  # 训练记录 JSON：两阶段各一份，逐轮追加写盘（dataset/log/train/）
+  train_log_dir = PathConfig.LOG_DIR / "train"
+  head_record = (train_log_dir / f"train_{LogConfig.UUID}_head.json"
+                 if tc.SAVE_TRAIN_LOG else None)
+  finetune_record = (train_log_dir / f"train_{LogConfig.UUID}_finetune.json"
+                     if tc.SAVE_TRAIN_LOG else None)
+  if head_record is not None:
+    print(f"训练记录会实时写入: {train_log_dir}\\train_{LogConfig.UUID}_*.json")
 
   # 阶段一：冻结 backbone，只训三个 head（学习率可以大一点，轮数少一些）
   opt = build_opt(model, tc.LR_HEAD)
   sched = make_scheduler(opt)
-  make_trainer(tc.EPOCHS_HEAD, ckpt_path, dev).train(
+  make_trainer(tc.EPOCHS_HEAD, ckpt_path, dev,
+               records_path=head_record,
+               val_interval=tc.VAL_INTERVAL).train(
       model, dl, opt, sched, freeze_backbone=True, val_dataloader=val_dl)
 
   # 阶段二：解冻 backbone 整体微调（学习率降一个量级，轮数多一些）
-  trainer = make_trainer(tc.EPOCHS_FINETUNE, ckpt_path, dev)
+  trainer = make_trainer(tc.EPOCHS_FINETUNE, ckpt_path, dev,
+                         records_path=finetune_record,
+                         val_interval=tc.VAL_INTERVAL)
   trainer.unfreeze_backbone(model)
   opt = build_opt(model, tc.LR_FINETUNE)
   sched = make_scheduler(opt)

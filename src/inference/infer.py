@@ -225,7 +225,10 @@ class Inferer:
     self.model.eval()
     results = []
     with torch.no_grad():
-      for imgs, _, _ in dl:
+      for batch in dl:
+        imgs = batch[0]
+        if not isinstance(imgs, torch.Tensor):     # collate_fn 现在返回 numpy
+          imgs = torch.as_tensor(imgs, dtype=torch.float32)
         results.extend(self.predict(imgs))
     return results
 

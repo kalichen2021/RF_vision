@@ -23,8 +23,10 @@ import argparse
 import random
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 
+import cv2
 import numpy as np
 from rich.console import Console
 from rich.progress import (BarColumn, MofNCompleteColumn, Progress,
@@ -47,6 +49,7 @@ FONT_VARIANTS = ppcfg.FONT_VARIANTS
 from src.preprocess import Preprocess
 from src.preprocess.process import build_record, save_dataset, save_sample
 from src.utils.debug_tools import read_image
+from src.utils.image import crop_square
 from src.utils.font_processor import font2img, get_available_fonts, get_font_path
 
 # 笔画粗细 / 画布尺寸的候选，用来增加字形多样性
@@ -133,6 +136,41 @@ def pick_env_path(env_paths: list[Path], usage: dict[Path, int],
   return random.choices(env_paths, weights=weights, k=1)[0]
 
 
+def prepare_env(path: Path, pp) -> tuple[np.ndarray, list]:
+  """读一张环境图 → 裁正方形 → 检测平坦区域（同一张图只做一次）。
+
+  Args:
+      path: 环境图路径。
+      pp: ``Preprocess`` 实例。
+
+  Returns:
+      ``(裁切后的环境图, 平坦区域四边形列表)``。
+
+  Raises:
+      ValueError: 图片读取失败。
+  """
+  env = read_image(path)
+  if ppcfg.ENV_CROP_SQUARE:
+    env, _ = crop_square(env)
+  return env, pp.detect_quads(env)
+
+
+def make_glyph_pool(fonts: list[str]) -> tuple[list[np.ndarray], list[int]]:
+  """预渲染一批数字字形，整个生成过程复用。
+
+  原先是**每个样本**都调一次 ``make_font_imgs``（50 次 PIL 渲染），
+  预渲染一次后每样本只做「挑几个字形 + 透视变换」，是提速的主要来源。
+
+  Args:
+      fonts: 可用字体文件名列表。
+
+  Returns:
+      ``(字形列表, 与之一一对应的数字类别)``。
+  """
+  variants = max(1, int(ppcfg.FONT_VARIANTS)) * max(1, int(ppcfg.GLYPH_POOL_FACTOR))
+  return make_font_imgs(ppcfg.SAMPLE_COUNT_RATE, fonts, variants)
+
+
 def main(argv: list[str] | None = None) -> int:
   """批量生成融合样本，返回进程退出码"""
   console = Console()
@@ -163,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"[bold]目标[/] {total} 张 · "
                 f"[bold]输出[/] {out_dir}")
 
-  quads_cache: dict[Path, list] = {}
+  quads_cache: dict[Path, tuple[np.ndarray, list]] = {}
   records: list[dict] = []
   skipped = 0
   usage = {p: 0 for p in env_paths}     # 每张图成功使用次数（用于降权）
@@ -172,53 +210,86 @@ def main(argv: list[str] | None = None) -> int:
   max_attempts = max(total * 20, len(env_paths) * 50)
   started = time.perf_counter()
 
+  # 预渲染字形池（整个生成过程共用）+ 确定并行度
+  glyphs, digit_ids = make_glyph_pool(fonts)
+  workers = max(1, int(ppcfg.GEN_WORKERS))
+  if args.show:
+    workers = 1            # 调试图文件名只按 shape 命名，多线程会互相覆盖
+  if workers > 1:
+    cv2.setNumThreads(1)   # 每个 cv2 调用单线程，避免和线程池抢核
+  debug_dir = (pathcfg.LOG_DIR / "preprocess" / _uuid) if args.show else None
+
   columns = (SpinnerColumn(), TextColumn("[bold cyan]{task.description}"),
              BarColumn(), MofNCompleteColumn(),
              TextColumn("{task.fields[note]}"), TimeElapsedColumn())
   with Progress(*columns, console=console) as progress:
     task = progress.add_task("生成样本", total=total, note="")
+    pending: dict[Future, Path] = {}
 
-    while len(records) < total and attempts < max_attempts:
+    def _submit(pool: ThreadPoolExecutor) -> bool:
+      """提交一个生成任务；返回 False 表示这张图读失败（已计入跳过）。"""
+      nonlocal attempts
       attempts += 1
       path = pick_env_path(env_paths, usage, failures)
-
-      try:
-        env_img = read_image(path)
-      except ValueError as exc:      # 坏图只跳过，不中断整批
-        skipped += 1
-        failures[path] = failures.get(path, 0) + 1
-        progress.update(task, note=f"[red]读取失败[/] {path.name}")
-        console.print(f"[red]{exc}[/]")
-        continue
-
-      # 平坦区域对同一张图是确定的：缓存后，同一张图只换切分 / 字体 / 数字
       if path not in quads_cache:
-        quads_cache[path] = pp.detect_quads(env_img)
+        try:
+          quads_cache[path] = prepare_env(path, pp)
+        except ValueError as exc:      # 坏图只跳过，不中断整批
+          failures[path] = failures.get(path, 0) + 1
+          progress.update(task, note=f"[red]读取失败[/] {path.name}")
+          console.print(f"[red]{exc}[/]")
+          return False
+      env_img, quads = quads_cache[path]
+      fut = pool.submit(pp.process, glyphs, env_img, args.show, quads,
+                        digit_ids, debug_dir)
+      pending[fut] = path
+      return True
 
-      glyphs, digit_ids = make_font_imgs(ppcfg.SAMPLE_COUNT_RATE, fonts)
-      fused, labels = pp.process(
-          glyphs, env_img, show_cnt=args.show, quads=quads_cache[path],
-          digit_ids=digit_ids,
-          debug_dir=(pathcfg.LOG_DIR / "preprocess" / _uuid)
-          if args.show else None)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+      while (len(records) < total or pending) and attempts < max_attempts:
+        # 保持在途任务数 <= workers*2：既不空转，也不无限堆内存
+        while (len(pending) < workers * 2 and attempts < max_attempts
+               and len(records) + len(pending) < total):
+          if not _submit(pool):
+            skipped += 1
+        if not pending:
+          break
 
-      if fused is None:
-        skipped += 1
-        failures[path] = failures.get(path, 0) + 1
-        progress.update(task, note=f"[yellow]跳过[/] {path.name} "
-                                   f"无可用板位（累计 {skipped} 次）")
-        continue
+        done, _ = wait(pending, return_when=FIRST_COMPLETED)
+        for fut in done:
+          path = pending.pop(fut)
+          try:
+            fused, labels = fut.result()
+          except Exception as exc:       # 单张失败不影响整批
+            skipped += 1
+            failures[path] = failures.get(path, 0) + 1
+            console.print(f"[red]{path.name} 生成失败: {exc}[/]")
+            continue
 
-      usage[path] = usage.get(path, 0) + 1
-      failures[path] = 0
-      name = f"{len(records):05d}_{path.stem}"
-      extra = {"source": path.name,
-               "digit_count": len(labels),
-               "area_range": list(ppcfg.AREA_RANGE)}
-      save_sample(out_dir, name, fused, labels, extra, write_labels=False)
-      records.append(build_record(f"{name}.png", fused, labels, extra))
-      progress.update(task, advance=1,
-                      note=f"[green]ok[/] {path.name} 数字 {len(labels)} 个")
+          if fused is None:
+            skipped += 1
+            failures[path] = failures.get(path, 0) + 1
+            progress.update(task, note=f"[yellow]跳过[/] {path.name} "
+                                       f"无可用板位（累计 {skipped} 次）")
+            continue
+
+          usage[path] = usage.get(path, 0) + 1
+          failures[path] = 0
+          name = f"{len(records):05d}_{path.stem}"
+          extra = {"source": path.name,
+                   "digit_count": len(labels),
+                   "area_range": list(ppcfg.AREA_RANGE)}
+          # 落盘前先缩放到 SAVE_SIZE：缩小后 PNG 解码快 3~4 倍（标签是归一化坐标，不受影响）
+          img = fused
+          if ppcfg.SAVE_SIZE is not None:
+            img = cv2.resize(
+                img, (int(ppcfg.SAVE_SIZE[1]), int(ppcfg.SAVE_SIZE[0])),
+                interpolation=cv2.INTER_AREA)
+          img_path, _ = save_sample(out_dir, name, img, labels, extra,
+                                    write_labels=False, ext=ppcfg.SAVE_EXT)
+          records.append(build_record(img_path.name, img, labels, extra))
+          progress.update(task, advance=1,
+                          note=f"[green]ok[/] {path.name} 数字 {len(labels)} 个")
 
   labels_path = save_dataset(out_dir, records)
   elapsed = time.perf_counter() - started

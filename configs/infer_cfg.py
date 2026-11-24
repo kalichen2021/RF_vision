@@ -14,5 +14,8 @@ class InferConfig:
   - 具体文件名：直接使用该权重。
   """
 
-  SELECT_MODEL_ID: str = "ckpt_20261123_225153_554.pt"
-  # SELECT_MODEL_ID = "0"
+  # SELECT_MODEL_ID: str = "ckpt_20261123_225153_554.pt"
+  SELECT_MODEL_ID: str = "0"
+
+  # 推理时是否先居中裁成正方形再缩放（False = 直接拉伸，会把画面压扁）
+  CROP_SQUARE: bool = True

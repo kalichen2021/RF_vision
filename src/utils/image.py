@@ -18,7 +18,10 @@ from typing import Literal
 
 import cv2
 import numpy as np
-import torch
+
+# 注意：本模块会被 DataLoader worker 导入（DigitDataset 用 read_gray / resize），
+# 所以**顶层不 import torch**（每个 worker 会多背 1GB+ 提交内存）。
+# 需要张量的函数在函数内部惰性 import。
 
 # ImageNet 归一化参数（ResNet 预训练权重的统计量）
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
@@ -28,6 +31,8 @@ IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
 ChannelMode = Literal["gray", "rgb"]
 # 缩放插值名
 InterpMode = Literal["area", "linear", "cubic"]
+# 裁切模式：none = 不裁；center = 居中裁正方形；random = 随机起点裁正方形
+CropMode = Literal["none", "center", "random"]
 
 _INTERP_FLAGS: dict[str, int] = {
     "area": cv2.INTER_AREA,
@@ -146,8 +151,51 @@ def normalize(img_rgb: np.ndarray) -> np.ndarray:
   return (arr - _MEAN_CHW) / _STD_CHW
 
 
+def crop_square(img: np.ndarray, origin: tuple[int, int] | None = None,
+                rng: np.random.Generator | None = None
+                ) -> tuple[np.ndarray, tuple[int, int]]:
+  """裁出最大的正方形（边长 = min(H, W)），避免后续缩放把画面拉扁。
+
+  Args:
+      img: 任意图像（灰度 / 彩色均可）。
+      origin: 正方形左上角 `(x, y)`；None 表示随机取起点（“起点任意”），
+          越界会自动夹到合法范围。
+      rng: 随机数发生器；None 时新建 `np.random.default_rng()`。
+
+  Returns:
+      `(裁切后的正方形图像, (x0, y0))`；输入已是正方形时原样返回 `(0, 0)`。
+  """
+  h, w = img.shape[:2]
+  side = min(h, w)
+  if h == w:
+    return img, (0, 0)
+  if origin is None:
+    rng = np.random.default_rng() if rng is None else rng
+    x0 = int(rng.integers(0, w - side + 1))
+    y0 = int(rng.integers(0, h - side + 1))
+  else:
+    x0 = int(np.clip(origin[0], 0, w - side))
+    y0 = int(np.clip(origin[1], 0, h - side))
+  return img[y0:y0 + side, x0:x0 + side], (x0, y0)
+
+
+def center_origin(img: np.ndarray) -> tuple[int, int]:
+  """居中裁正方形时，正方形左上角的坐标 `(x0, y0)`。
+
+  Args:
+      img: 任意图像。
+
+  Returns:
+      `(x0, y0)`；输入已是正方形时为 `(0, 0)`。
+  """
+  h, w = img.shape[:2]
+  side = min(h, w)
+  return (w - side) // 2, (h - side) // 2
+
+
 def to_tensor(img: np.ndarray, size_hw: tuple[int, int] = (384, 384),
-              mode: ChannelMode = "gray", interp: str = "area") -> torch.Tensor:
+              mode: ChannelMode = "gray", interp: str = "area",
+              crop: CropMode = "none") -> torch.Tensor:
   """任意图像 → `(1, 3, H, W)` 归一化张量（训练 / 推理共用的唯一入口）。
 
   Args:
@@ -155,17 +203,32 @@ def to_tensor(img: np.ndarray, size_hw: tuple[int, int] = (384, 384),
       size_hw: 送进网络的目标尺寸 `(高, 宽)`。
       mode: `"gray"`（灰度复制 3 通道，与训练样本一致）或 `"rgb"`。
       interp: 缩放插值。
+      crop: `"none"` 直接缩放；`"center"` 先居中裁正方形；
+          `"random"` 先随机起点裁正方形（相当于位置增强）。
 
   Returns:
       `(1, 3, H, W)` float32 张量（仍在 CPU 上）。
+
+  Raises:
+      ValueError: `crop` 取值非法。
   """
+  if crop == "center":
+    img, _ = crop_square(img, origin=center_origin(img))
+  elif crop == "random":
+    img, _ = crop_square(img)
+  elif crop != "none":
+    raise ValueError(
+        f"crop 应为 'none' / 'center' / 'random'，收到 {crop!r}")
+  import torch      # 惰性导入：worker 不转张量，不需要 torch
+
   rgb = to_three_channels(img, mode)
   rgb = resize(rgb, size_hw, interp)
   return torch.from_numpy(normalize(rgb)).unsqueeze(0)
 
 
 def load_tensor(path: Path | str, size_hw: tuple[int, int] = (384, 384),
-                mode: ChannelMode = "gray", interp: str = "area") -> torch.Tensor:
+                mode: ChannelMode = "gray", interp: str = "area",
+                crop: CropMode = "none") -> torch.Tensor:
   """读一张图片文件并转成 `(1, 3, H, W)` 归一化张量。
 
   Args:
@@ -173,11 +236,12 @@ def load_tensor(path: Path | str, size_hw: tuple[int, int] = (384, 384),
       size_hw: 送进网络的目标尺寸 `(高, 宽)`。
       mode: 通道模式，见 :func:`to_tensor`。
       interp: 缩放插值。
+      crop: 裁切模式，见 :func:`to_tensor`。
 
   Returns:
       `(1, 3, H, W)` float32 张量。
   """
-  return to_tensor(read_image(path), size_hw, mode, interp)
+  return to_tensor(read_image(path), size_hw, mode, interp, crop)
 
 
 def denormalize(tensor: torch.Tensor) -> np.ndarray:

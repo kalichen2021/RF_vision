@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from pathlib import Path
@@ -8,6 +9,7 @@ from torch.utils.data import DataLoader
 
 from src.utils.logging_tools import get_logger
 
+from .dataset import batch_to_torch
 from .model import CenterNetDigit, build_target, total_loss
 
 # 只发日志，不直接 print：输出格式 / 级别由 CLI 入口的 setup_logging() 决定
@@ -18,12 +20,21 @@ class Trainer:
   def __init__(self, epochs: int, device: str,
                early_stopping_patience: int = 3,
                ckpt_path: str | Path = "ckpt_last.pt",
-               use_amp: bool = False, cudnn_benchmark: bool = False) -> None:
+               use_amp: bool = False, cudnn_benchmark: bool = False,
+               val_interval: int = 1,
+               records_path: str | Path | None = None) -> None:
     self.epochs = epochs
     self.device = device
     self.ckpt_path = ckpt_path
     self.early_stopping_patience = early_stopping_patience
     self.use_amp = bool(use_amp)
+    # 每隔多少轮跑一次验证（1 = 每轮）；>1 时只在验证轮更新 best / 早停 / 降 lr
+    self.val_interval = max(1, int(val_interval))
+    # 训练记录 JSON（每轮 train / val 指标都会追加写盘）；None 表示不写
+    self.records_path = None if records_path is None else Path(records_path)
+    self._records: list[dict] = []
+    self._meta: dict[str, Any] = {}
+    self._best_metric = float("inf")
     # cudnn.benchmark：输入尺寸固定时让 cudnn 自动挑最快的卷积算法
     if cudnn_benchmark and str(device).startswith("cuda"):
       torch.backends.cudnn.benchmark = True
@@ -102,20 +113,34 @@ class Trainer:
         block.eval()
 
   @staticmethod
-  def _scheduler_step(scheduler: Any, metric: float) -> None:
-    """推进学习率调度器
+  def _scheduler_step(scheduler: Any, metric: float | None) -> None:
+    """推进学习率调度器。
 
-    `ReduceLROnPlateau` 必须喂指标（`scheduler.step(metric)`），
-    其余按 epoch 走的调度器（如 CosineAnnealingLR）不带参数。
+    ``ReduceLROnPlateau`` 必须喂指标（``scheduler.step(metric)``），其余按 epoch
+    走的调度器（如 CosineAnnealingLR）不带参数。
 
     Args:
-        scheduler: 学习率调度器实例
-        metric (float): 用于判停 / 降 lr 的指标（有验证集时是 val loss）
+        scheduler: 学习率调度器实例。
+        metric: 用于判停 / 降 lr 的指标；None 表示本轮到没有验证结果
+            （``ReduceLROnPlateau`` 这种情况直接跳过，不拿训练 loss 凑数）。
     """
     if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-      scheduler.step(metric)
+      if metric is not None:
+        scheduler.step(metric)
     else:
       scheduler.step()
+
+  def _save_records(self) -> None:
+    """把训练记录写成 JSON（先写临时文件再原子替换，跑一半崩了也不会留半个文件）。"""
+    if self.records_path is None:
+      return
+    self.records_path.parent.mkdir(parents=True, exist_ok=True)
+    self._meta["best_metric"] = self._best_metric
+    payload = {"meta": self._meta, "epochs": self._records}
+    tmp = self.records_path.with_suffix(self.records_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                   encoding="utf-8")
+    tmp.replace(self.records_path)
 
   @torch.no_grad()
   def _eval_losses(self, model: CenterNetDigit, dataloader: DataLoader
@@ -137,7 +162,8 @@ class Trainer:
     device_type = "cuda" if str(self.device).startswith("cuda") else "cpu"
     amp_enabled = bool(self.use_amp and device_type == "cuda")
     agg = [.0, .0, .0, .0]  # loss, heatmap, offset, cls
-    for imgs, quads_list, digits_list in dataloader:
+    for batch in dataloader:
+      imgs, quads_list, digits_list = batch_to_torch(batch)
       imgs = imgs.to(self.device, non_blocking=True)
       hm_t, reg_t, cls_t, mask = build_target(
           quads_list, digits_list, imgs.shape[2] // 8, imgs.shape[3] // 8)
@@ -206,6 +232,23 @@ class Trainer:
                  "on" if amp_enabled else "off",
                  f"{n_train:,}", f"{n_total:,}", n_train / max(n_total, 1) * 100)
 
+    # 训练记录（JSON）的元信息
+    self._records = []
+    self._best_metric = float("inf")
+    self._meta = {
+        "ckpt": str(self.ckpt_path),
+        "device": str(self.device),
+        "epochs": self.epochs,
+        "lr_init": lr,
+        "optimizer": optimizer.__class__.__name__,
+        "scheduler": scheduler.__class__.__name__,
+        "amp": amp_enabled,
+        "trainable_params": n_train,
+        "total_params": n_total,
+        "val_interval": self.val_interval,
+        "early_stopping_patience": self.early_stopping_patience,
+    }
+
     # 监控指标：有验证集时是 val loss，否则退回训练 loss
     best_metric = float("inf")
     metric_name = "val loss" if val_dataloader is not None else "loss"
@@ -219,9 +262,10 @@ class Trainer:
       epoch_start = time.perf_counter()
       data_wait = 0.0                      # 等 dataloader 出数据的累计时间
       last = epoch_start
-      for imgs, quads_list, digits_list in dataloader:
+      for batch in dataloader:
         now = time.perf_counter()
         data_wait += now - last            # 上一轮 step 结束到收到这个 batch
+        imgs, quads_list, digits_list = batch_to_torch(batch)
         imgs = imgs.to(self.device, non_blocking=True)
         hm_t, reg_t, cls_t, mask = build_target(
             quads_list, digits_list, imgs.shape[2] // 8, imgs.shape[3] // 8)
@@ -246,15 +290,22 @@ class Trainer:
       n = max(len(dataloader), 1)
       loss_avg, hm_avg, reg_avg, cls_avg = (v / n for v in agg)
 
-      # 每轮在验证集上跑一次 eval：best / 早停 / 调度器全部盯 val loss
-      if val_dataloader is not None:
+      # 每 val_interval 轮（以及最后一轮）跑一次验证：
+      # best / 早停 / 降 lr 都只看验证结果；没有验证集的训练用训练 loss 兜底
+      do_val = val_dataloader is not None and (
+          (epoch + 1) % self.val_interval == 0 or epoch == self.epochs - 1)
+      val_loss = val_hm = val_reg = val_cls = None
+      if do_val:
         val_loss, val_hm, val_reg, val_cls = self._eval_losses(
             model, val_dataloader)
-        metric = val_loss
+        metric: float | None = val_loss
         val_note = (f" | Val Loss: {val_loss:.4f}, Heatmap: {val_hm:.4f}, "
                     f"Offset: {val_reg:.4f}, Classification: {val_cls:.4f}")
-      else:
+      elif val_dataloader is None:
         metric = loss_avg
+        val_note = ""
+      else:
+        metric = None
         val_note = ""
 
       self._scheduler_step(scheduler, metric)
@@ -263,16 +314,37 @@ class Trainer:
       gpu_ratio = max(0.0, 1.0 - data_wait / max(epoch_time, 1e-6))
       lr_now = optimizer.param_groups[0]["lr"]
 
-      # 早停：连续 early_stopping_patience 轮监控指标没有变好就停
-      # （best_metric / bad_epochs 必须定义在 epoch 循环外，否则条件恒为 False）
-      if metric < best_metric:
-        best_metric, bad_epochs = metric, 0
-        best_state = {k: v.detach().cpu().clone()
-                      for k, v in model.state_dict().items()}
-        note = "  (best)"
+      # 早停只在有验证结果的轮次判断（没跑验证的轮次不动 bad_epochs）
+      is_best = False
+      if metric is not None:
+        if metric < best_metric:
+          best_metric, bad_epochs, is_best = metric, 0, True
+          best_state = {k: v.detach().cpu().clone()
+                        for k, v in model.state_dict().items()}
+          note = "  (best)"
+        else:
+          bad_epochs += 1
+          note = f"  (no improve {bad_epochs}/{self.early_stopping_patience})"
       else:
-        bad_epochs += 1
-        note = f"  (no improve {bad_epochs}/{self.early_stopping_patience})"
+        note = "  (skip val)"
+      self._best_metric = best_metric
+
+      # 逐轮记录（有验证结果时把 val 一并写入）
+      self._records.append({
+          "epoch": epoch + 1,
+          "train": {"loss": round(loss_avg, 6), "heatmap": round(hm_avg, 6),
+                    "offset": round(reg_avg, 6), "cls": round(cls_avg, 6)},
+          "val": None if val_loss is None else {
+              "loss": round(val_loss, 6), "heatmap": round(val_hm, 6),
+              "offset": round(val_reg, 6), "cls": round(val_cls, 6)},
+          "lr": lr_now,
+          "epoch_time": round(epoch_time, 3),
+          "data_wait": round(data_wait, 3),
+          "gpu_ratio": round(gpu_ratio, 3),
+          "is_best": is_best,
+          "bad_epochs": bad_epochs,
+      })
+      self._save_records()
 
       _logger.info("Epoch %d/%d, Loss: %.4f, Heatmap: %.4f, Offset: %.4f, "
                    "Classification: %.4f%s | lr=%.2e | %.1fs, 等数据 %.1fs, "
@@ -296,6 +368,7 @@ class Trainer:
     }, self.ckpt_path)
     _logger.info("权重已保存: %s  (best %s %.4f)",
                  self.ckpt_path, metric_name, best_metric)
+    self._save_records()
     return best_metric
 
   def evaluate(self, model: CenterNetDigit, dataloader: DataLoader,

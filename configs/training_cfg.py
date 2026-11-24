@@ -46,13 +46,18 @@ class TrainingConfig:
 
   # --------训练超参--------
   DROPOUT: float = 0.3              # head 里的 Dropout2d 概率（0 表示不加）
-  EARLY_STOPPING_PATIENCE: int = 3  # 连续多少轮监控指标没变好就停
+  EARLY_STOPPING_PATIENCE: int = 4  # 连续多少轮监控指标没变好就停
   LR_HEAD: float = 1e-3             # 阶段一：冻结 backbone，只训 head
   LR_FINETUNE: float = 1e-4         # 阶段二：解冻 backbone（必须比阶段一小）
 
   # 每个 epoch 在验证集上跑一次：best 权重 / 早停 / 调度器全部以 val loss 为准
   # （训练 loss 受 Dropout2d 和 BN batch 统计影响，跟泛化能力不是一回事）
   VALIDATE_EVERY_EPOCH: bool = True
+  # 每隔多少轮跑一次验证（1 = 每轮；>1 时只在验证轮更新 best / 早停 / 降 lr）
+  VAL_INTERVAL: int = 1
+
+  # 训练记录（每轮 train / val 指标）写到 dataset/log/train/<uuid>.json
+  SAVE_TRAIN_LOG: bool = True
 
   # ReduceLROnPlateau：val loss 连续 LR_PLATEAU_PATIENCE 轮没变好就乘 LR_PLATEAU_FACTOR
   LR_PLATEAU_FACTOR: float = 0.5

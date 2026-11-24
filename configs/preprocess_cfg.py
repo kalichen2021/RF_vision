@@ -14,7 +14,13 @@ class PreprocessConfig:
   """合成样本生成的全部参数。"""
 
   # 本次批量生成要产出的样本总数（`-n` 可临时覆盖）
-  SAMPLE_GEN_NUM: int = 10
+  SAMPLE_GEN_NUM: int = 20000
+  # 落盘前先缩放到这个尺寸 (高, 宽)：训练输入本来就是 384，
+  # 存 384 比存 720 的 PNG **解码快 3~4 倍**（读图是训练数据管线的大头）；
+  # None = 保持原图尺寸（以后想换 512 训练时才需要）
+  SAVE_SIZE: tuple[int, int] | None = (384, 384)
+  # 样本图格式："png"（无损）或 "jpg"（解码更快、体积更小，但轻微压缩）
+  SAVE_EXT: str = "png"
   # 数字类别数（贴图池覆盖 0 ~ N-1，需要 >= 10 才能覆盖 0~9）
   SAMPLE_COUNT_RATE: int = 10
   # 每张样本包含的数字个数范围（含两端）；凑不够下限就换一张图重试
@@ -26,14 +32,26 @@ class PreprocessConfig:
   # 超过阈值后每多用一次，权重乘以该衰减系数（越小越不容易被再次选中）
   ENV_USE_DECAY: float = 0.2
 
+  # 环境图先**裁成正方形**（起点随机）再贴数字：样本本身就是方形，
+  # 训练时缩放不会把画面拉扁，同时随机起点也等于一次位置增强
+  ENV_CROP_SQUARE: bool = True
+
   # --------QUADS---------（目标：模拟「板上写着数字」的平面放置）
   # 畸变容忍度（映射为允许长宽比 1.5 + 3.5*d），板子接近矩形，取偏小值
   DISTORTION: tuple[float, float] = (0.0, 0.01)
+
+  # --------生成速度---------
+  # 并行线程数（1 = 单线程）。融合 / 切分是 CPU 密集，线程数 ≈ 物理核数即可；
+  # 内存很紧时降到 2~4（每个在途任务会持有一张 720×720 的缓冲区）
+  GEN_WORKERS: int = 8
+  # 字形池倍数：一次性预渲染 SAMPLE_COUNT_RATE * FONT_VARIANTS * 该值 个字，
+  # 不再每个样本都用 PIL 重新渲染（原先这是最大的单笔开销）
+  GLYPH_POOL_FACTOR: int = 4
   # 网格弯曲度：板是刚体，必须为 0，否则切出来的格子不是平面四边形的透视投影
   NORMALIZE: tuple[float, float] = (0.0, 0.0)
-  # 数字四边形面积（像素²）：<1 时按占平坦区域面积的比例解释；
-  # 板面会按 BOARD_MARGIN 自动放大，给数字留出板边
-  AREA_RANGE: tuple[int, int] = (10000, 80000)
+  # 板位（板面）四边形面积（像素²）：<1 时按占平坦区域面积的比例解释；
+  # 数字面积 = 板位面积 × (1 - 2*BOARD_MARGIN)²，换留边不会改变板位大小
+  AREA_RANGE: tuple[int, int] = (8000, 100000)
   # 笔画粗细 / 画布尺寸的候选，用来增加字形多样性
   THICKNESS_CHOICES: tuple[int, ...] = (0, 0, 1, 1, 2, 3, 3, 4, 4)
   CANVAS_CHOICES: tuple[int, ...] = (48, 64, 64, 80)
@@ -62,7 +80,7 @@ class PreprocessConfig:
   # 数字会按对比度自动压暗 → 稳定得到「白纸黑字」（暗环境也一样）
   BOARD_GRAY: tuple[int, int] | None = (190, 240)
   # 反极性（深色板 + 亮字）样本比例：0 = 全部白纸黑字；以白纸黑字为主时取小值
-  POLARITY_FLIP_RATE: float = 0.1
+  POLARITY_FLIP_RATE: float = 0
   # 反极性样本的板面灰度区间（深色板）
   BOARD_GRAY_FLIP: tuple[int, int] = (25, 70)
   # 融合后最小可见对比度 |数字-背景|*alpha/255：低于该值就拉满透明度并提高对比度，
@@ -70,8 +88,9 @@ class PreprocessConfig:
   MIN_VISIBLE_CONTRAST: float = 0.12
   # 旧参数：板面相对背景的亮度偏移，仅当 BOARD_GRAY 为 None 时生效
   BOARD_TONE: tuple[int, int] = (12, 30)
-  # 数字在板面内的内缩比例，相当于板子给数字留的边距
-  BOARD_MARGIN: float = 0
+  # 数字在板面内的内缩比例（即板子给数字留的边距），支持区间：
+  # 每张图抽一档，同一张图内所有数字共用；0 = 数字铺满板面
+  BOARD_MARGIN: tuple[float, float] = (0.08, 0.2)
   # 是否给板面画软投影（能提供更强的平面 / 遮挡线索）
   BOARD_SHADOW: bool = False
   # 判定「同一平面」的深度容差（0~1）
