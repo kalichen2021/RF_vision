@@ -1,11 +1,21 @@
+# 运行依赖（Python >= 3.10）
+#
+# torch / torchvision 是 CUDA 13.4 构建的本地版本号（+cu134），PyPI 上没有，
+# 安装时必须带上 PyTorch 官方源：
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu134
+#
+# 只用 CPU / 其它 CUDA 版本时，把下面两行改成对应版本再装（不必加 extra-index-url）：
+#   torch==2.15.0
+#   torchvision==0.29.2
 matplotlib==3.11.2
 numpy==2.5.5
 opencv_contrib_python==5.0.0.93
 opencv_python==5.0.0.93
 Pillow==10.1.0
-Pillow==13.0.0
 pyserial==3.5
-pytest==9.2.0
 rich==15.0.0
 torch==2.15.0+cu134
 torchvision==0.29.2+cu134
+
+# 开发 / 测试用（只想跑程序可以不装）
+pytest==9.2.0
