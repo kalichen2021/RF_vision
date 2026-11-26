@@ -107,3 +107,81 @@ def test_mark_crop_box_dims_outside() -> None:
   out = CameraDetector.mark_crop_box(vis, (50, 0, 100))
   assert out.shape == vis.shape
   assert out[50, 5].mean() < out[50, 100].mean()   # 框外更暗
+
+
+class _FakeInferrerWithHeat:
+  """带热力图的替身 Inferer：`infer` 返回原始三张图，`decode` 返回固定框。
+
+    `predict` 故意抛错：开了热力图预览就不该再走 predict（会多跑一次前向）。
+  """
+
+  def __init__(self) -> None:
+    self.hm = np.full((48, 48), 0.01, np.float32)
+    self.hm[10, 20] = 0.9
+    self.infer_calls = 0
+
+  def infer(self, tensor: Any) -> tuple[Any, Any, Any]:
+    import torch
+    self.infer_calls += 1
+    hm = torch.from_numpy(self.hm)[None, None]
+    return hm, torch.zeros(1, 8, 48, 48), torch.zeros(1, 10, 48, 48)
+
+  def decode(self, hm_p: Any, reg_p: Any, cls_p: Any, thr: float = 0.3,
+             topk: int = 30) -> list[tuple[Any, ...]]:
+    import torch
+    pts = torch.tensor([[[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6]]])
+    return [(pts, torch.tensor([7]), torch.tensor([0.9]))]
+
+  def predict(self, *_args: Any, **_kwargs: Any) -> Any:
+    raise AssertionError("开关热力图时不应该再调 predict")
+
+
+def _heat_detector(show_heatmap: bool) -> CameraDetector:
+  frame = np.full((480, 640, 3), 128, np.uint8)
+  return CameraDetector(_FakeInferrerWithHeat(), show=False,
+                        show_heatmap=show_heatmap,
+                        capture=_FakeCapture(frame))
+
+
+def test_heatmap_disabled_keeps_old_path() -> None:
+  """默认关闭：走 predict，不返回热力图（不增加任何开销）"""
+  cam = _detector("crop")
+  import torch
+  result, hm = cam.infer(torch.zeros(1, 3, 384, 384))
+  assert hm is None
+  assert result[0].shape[-1] == 2
+
+
+def test_heatmap_enabled_returns_raw_map() -> None:
+  """开启后：一次前向同时拿到解码结果与 `(h, w)` 热力图"""
+  cam = _heat_detector(show_heatmap=True)
+  import torch
+  result, hm = cam.infer(torch.zeros(1, 3, 384, 384))
+  assert hm is not None and hm.shape == (48, 48)
+  assert cam.inferrer.infer_calls == 1
+  assert result[0].shape[0] == 1
+
+
+def test_heatmap_image_shape_and_markers() -> None:
+  """热力图预览图尺寸与主画面一致，且会标出检出的中心点"""
+  cam = _heat_detector(show_heatmap=True)
+  import torch
+  result, hm = cam.infer(torch.zeros(1, 3, 384, 384))
+  img = cam.heatmap_image(hm, (640, 480), result)
+  assert img.shape == (480, 640, 3) and img.dtype == np.uint8
+  # 中心点 (0.5, 0.5) 附近应该有白色十字
+  assert img[236:244, 316:324].max() >= 200
+
+
+def test_heatmap_uses_fixed_color_scale(monkeypatch) -> None:
+  """色标固定：同一张图，改 vmax 会改颜色（否则会掩盖「峰值只有 0.72」）"""
+  from configs.realtime_cfg import RealtimeConfig as rtcfg
+
+  cam = _heat_detector(show_heatmap=True)
+  hm = np.full((8, 8), 0.35, np.float32)
+  monkeypatch.setattr(rtcfg, "HEATMAP_VMAX", 1.0)
+  a = cam.heatmap_image(hm, (64, 64))
+  monkeypatch.setattr(rtcfg, "HEATMAP_VMAX", 0.35)
+  b = cam.heatmap_image(hm, (64, 64))
+  assert not np.array_equal(a, b), "vmax 变化时颜色必须跟着变（说明没有自动归一化）"
+

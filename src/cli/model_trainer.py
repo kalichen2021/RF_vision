@@ -8,9 +8,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # 否则每个 worker 都会加载一整套 torchvision + ResNet，常驻内存接近 1GB/进程，
 # NUM_WORKERS=10 时光 worker 就要 9~10GB，直接把 16G 内存吃爆（GPU 反而空转）。
 
-# TODO: 训练时，按四个点的顺序排列，让模型分清上下左右。
-# TODO: 神经网络对尺度缩放的兼容性不够敏感
-
 
 def get_device() -> str:
   """只在主进程里调用。worker 里不要碰 CUDA（每个进程各建 context 会吃显存）。"""

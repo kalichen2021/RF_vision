@@ -31,6 +31,17 @@ class RealtimeConfig:
   #   "full"  = 显示整幅画面，裁切区域以外压暗
   VIEW_MODE: str = "crop"
 
+  # --------热力图预览（排查「分数为什么不变」用）---------
+  # True 时额外弹一个窗口，实时显示中心热度图（伪彩色 + 数值）。
+  # 运行时按 `h` 可以开关；命令行 `--heatmap` / `--no-heatmap` 可覆盖。
+  SHOW_HEATMAP: bool = False
+  # 热力图窗口标题
+  HEATMAP_WINDOW_NAME: str = "digits_tracker_heatmap"
+  # 色标上限：**固定为 1.0**（即 sigmoid 的理论最大值）。
+  # 千万不要改成自动归一化：那样即使全图最高只有 0.72 也会被涂成深红，
+  # 反而看不出「峰值偏低 / 死区恒等于常数」这个问题。
+  HEATMAP_VMAX: float = 1.0
+
   # resize 插值："linear"（与训练 DigitDataset 一致）/ "area"（缩小更好）/
   # "cubic"（更锐利，计算更慢）
   RESIZE_INTERP: str = "area"

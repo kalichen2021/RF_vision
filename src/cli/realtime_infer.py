@@ -9,11 +9,14 @@
     python src/cli/realtime_infer.py --save             # 按 s 把画面存到 dataset/log/camera/<uuid>
 
 按键：`q` / `ESC` 退出，`s` 保存当前帧快照，`r` / `e` 顺时针 / 逆时针旋转 90°
-（旋转同时作用于显示画面和送进模型的图像）。
+（旋转同时作用于显示画面和送进模型的图像），`h` 开 / 关热力图预览窗口。
 
 预览默认 `--view crop`：窗口里是**居中裁切后的正方形**（和模型真正的输入一样），
 不再是 16:9 的长方形；`--view model` 看缩放到 384 后模型实际看到的画面，
 `--view full` 看完整画面（裁切区域以外压暗）。
+
+`--heatmap` 额外弹一个窗口显示中心热度图：**固定色标 0~1**，并在左上角给出
+`max / mean / 超阈值格子数`——用来判断热力图是不是「恒等于一个常数」（塔缩）。
 """
 
 import argparse
@@ -57,7 +60,8 @@ def build_detector(args: argparse.Namespace) -> CameraDetector:
       font_scale=ccfg.FONT_SCALE,
       rotate=args.rotate,
       input_mode=args.input_mode,
-      view=args.view)
+      view=args.view,
+      show_heatmap=args.heatmap)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,9 +88,15 @@ def main(argv: list[str] | None = None) -> int:
                       choices=("crop", "model", "full"),
                       help="预览显示什么：crop=裁切后的正方形（默认，同模型输入）"
                            " / model=模型真正看到的 384 画面 / full=整幅画面（框外压暗）")
+  parser.add_argument("--heatmap", action=argparse.BooleanOptionalAction,
+                      default=rtcfg.SHOW_HEATMAP,
+                      help="是否额外显示中心热力图窗口（默认取 realtime_cfg.SHOW_HEATMAP）；"
+                           "运行时按 h 也能切换")
   args = parser.parse_args(argv)
 
   setup_logging()      # src 模块只发 logger，格式 / 级别在这里定
+  if args.heatmap and args.no_show:
+    print("提示：--no-show 下不会弹窗，热力图预览自动失效")
   detector = build_detector(args)
   with detector:
     if not detector.is_open:

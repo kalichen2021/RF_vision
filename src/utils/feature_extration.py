@@ -797,7 +797,6 @@ def quad_point(quad: NDArray[np.floating], u: float, v: float
   return (1.0 - v) * p_top + v * p_bot
 
 
-# TODO: 使margin支持负数， 由于源数字也有原始边距
 def inset_quad(quad: NDArray[np.floating],
                margin: float | Sequence[float] = 0.18
                ) -> NDArray[np.float64]:

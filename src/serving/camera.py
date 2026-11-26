@@ -67,6 +67,9 @@ class CameraDetector:
           长宽比与模型输入一致）/ `"model"`（显示缩放到 IMG_SIZE 后模型
           真正看到的画面）/ `"full"`（显示整幅画面并压暗裁切区域以外）；
           None 时取 `configs.realtime_cfg.VIEW_MODE`
+      show_heatmap (bool | None): 是否额外开一个窗口显示中心热度图
+          （固定色标 0~`HEATMAP_VMAX`，带 max / mean / 超阈值格子数）；
+          None 时取 `configs.realtime_cfg.SHOW_HEATMAP`，运行时按 `h` 切换
       capture: 自定义 VideoCapture（测试注入用），None 时按 `index` 打开
   """
 
@@ -81,6 +84,7 @@ class CameraDetector:
                input_mode: str | None = None,
                crop_square: bool | None = None,
                view: str | None = None,
+               show_heatmap: bool | None = None,
                capture: Any = None) -> None:
     self.inferrer = inferrer
     self.img_size = tuple(img_size)
@@ -103,10 +107,15 @@ class CameraDetector:
     self.view = str(rtcfg.VIEW_MODE if view is None else view).lower()
     if self.view not in _VIEW_MODES:
       raise ValueError(f"view 应为 {_VIEW_MODES} 之一，收到 {view!r}")
+    # 热力图预览：单独窗口，用来判断热力图是否塌缩（峰值是否恒等于 bias）
+    self.heatmap_window = rtcfg.HEATMAP_WINDOW_NAME
+    self.show_heatmap = bool(
+        rtcfg.SHOW_HEATMAP if show_heatmap is None else show_heatmap)
 
     self.cap = capture if capture is not None else self._open(index, width, height)
     self.frames = 0                 # 已处理帧数
     self.last_frame = None          # 最近一帧（带叠加），供快照使用
+    self.last_heatmap = None        # 最近一帧的中心热度图 (h, w) 或 None
     self._t_prev = time.perf_counter()
     self._fps = 0.0
 
@@ -221,6 +230,77 @@ class CameraDetector:
     return self.inferrer.predict(self.frame2tensor(frame),
                                  thr=self.thr, topk=self.topk)[0]
 
+  def infer(self, tensor: torch.Tensor
+            ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+                       np.ndarray | None]:
+    """单帧前向 + 解码；需要热力图预览时顺带把中心热度图拿出来。
+
+    `Inferer.infer` 只做前向（内部已 `eval()` + `no_grad`），`decode` 是静态
+    方法，所以拿热力图**不需要多跑一次网络**。没开热力图预览时走原来的
+    `predict` 一条道，不增加任何开销。
+
+    Args:
+        tensor: `frame2tensor(...)` 得到的 `(1, 3, H, W)` 张量。
+
+    Returns:
+        `(结果, 热力图或 None)`：结果是 `(pts_norm, digits, scores)`；
+        热力图是 `(h, w)` 的 float32 数组（0~1，h/w 为特征图尺寸，384 输入时为 48×48）。
+    """
+    if not self.show_heatmap or not hasattr(self.inferrer, "infer"):
+      return (self.inferrer.predict(tensor, thr=self.thr, topk=self.topk)[0],
+              None)
+
+    hm_p, reg_p, cls_p = self.inferrer.infer(tensor)
+    result = self.inferrer.decode(hm_p, reg_p, cls_p,
+                                  thr=self.thr, topk=self.topk)[0]
+    hm = hm_p[0, 0].detach().float().cpu().numpy()
+    return result, hm
+
+  def heatmap_image(self, hm: np.ndarray, size: tuple[int, int],
+                    result: tuple[torch.Tensor, torch.Tensor,
+                                  torch.Tensor] | None = None
+                    ) -> np.ndarray:
+    """把 `(h, w)` 中心热度图放大成伪彩色预览图（固定色标 + 数值标注）。
+
+    两个刻意的设计，都是为了能看出「热力图是否异常」：
+
+    - **固定色标** `[0, HEATMAP_VMAX]`：不按当前帧最大值自动拉伸，
+      否则即使全图最高只有 0.72 也会被涂成满红，看不出峰值偏低；
+    - **放大用 NEAREST**：能直接看到「一格一个方块」的结构，
+      不会因为插值把死区平滑成一大片「看起来正常」的色块。
+
+    Args:
+        hm: 中心热度 `(h, w)` float32，0~1。
+        size: 目标显示尺寸 `(宽, 高)`，一般跟主预览画面一致便于左右对照。
+        result: 解码结果，给出时在白框交叉标出检出的中心点。
+
+    Returns:
+        `(高, 宽, 3)` BGR 图。
+    """
+    w, h = int(size[0]), int(size[1])
+    up = cv2.resize(np.asarray(hm, np.float32), (w, h),
+                    interpolation=cv2.INTER_NEAREST)
+    vmax = max(float(rtcfg.HEATMAP_VMAX), 1e-6)
+    vis = cv2.applyColorMap((np.clip(up / vmax, 0.0, 1.0) * 255).astype(np.uint8),
+                            cv2.COLORMAP_JET)
+
+    # 只看颜色不够，必须同时给数字：max / mean / 超过阈值的格子数
+    # （在**原始特征图**上统计，放大后的像素数没有意义）
+    raw = np.asarray(hm, np.float32)
+    thr = float(self.thr)
+    stats = (f"max={float(raw.max()):.3f}  mean={float(raw.mean()):.5f}  "
+             f"grid>{thr:g}={int((raw > thr).sum())}/{raw.size}  vmax={vmax:g}")
+    cv2.putText(vis, stats, (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                (255, 255, 255), 2, cv2.LINE_AA)
+
+    if result is not None and len(result[0]):
+      for cx, cy in result[0].numpy().mean(axis=1):
+        cv2.drawMarker(vis,
+                       (int(round(float(cx) * (w - 1))),
+                        int(round(float(cy) * (h - 1)))),
+                       (255, 255, 255), cv2.MARKER_CROSS, 12, 1)
+    return vis
+
   def draw(self, frame: np.ndarray,
            result: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
            crop_box: tuple[int, int, int] | None = None) -> np.ndarray:
@@ -300,8 +380,8 @@ class CameraDetector:
 
     退出条件：按 `q` / `ESC`、摄像头断流、或达到 `max_frames`。
 
-    快捷键：`s` 快照、`r` 顺时针转 90°、`e` 逆时针转 90°
-    （旋转同时作用于显示画面和送进模型的图像）。
+    快捷键：`s` 快照、`r` 顺时针转 90°、`e` 逆时针转 90°、
+    `h` 开 / 关热力图预览窗口（旋转同时作用于显示画面和送进模型的图像）。
 
     Args:
         max_frames (int | None): 处理多少帧后退出，None 表示一直跑
@@ -325,7 +405,8 @@ class CameraDetector:
       frame = self.rotate_frame(frame)
       model_img, box = self.crop_for_model(frame)
       tensor = self.frame2tensor(model_img)
-      result = self.inferrer.predict(tensor, thr=self.thr, topk=self.topk)[0]
+      result, hm = self.infer(tensor)
+      self.last_heatmap = hm
       vis = self.render(frame, model_img, tensor, box, result)
       self.last_frame = vis
       self.frames += 1
@@ -335,10 +416,14 @@ class CameraDetector:
                     f"   rot={self.rotate}   {vis.shape[1]}x{vis.shape[0]}",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                     (0, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(vis, "r/e: rotate  s: save  q: quit", (10, 60),
+        cv2.putText(vis, "r/e: rotate  s: save  h: heatmap  q: quit", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1,
                     cv2.LINE_AA)
         cv2.imshow(self.window_name, vis)
+        if self.show_heatmap and hm is not None:
+          cv2.imshow(self.heatmap_window,
+                     self.heatmap_image(hm, (vis.shape[1], vis.shape[0]),
+                                        result))
         key = cv2.waitKey(1) & 0xFF
         if key in (27, ord("q")):
           break
@@ -348,6 +433,14 @@ class CameraDetector:
           self.set_rotate((self.rotate + 90) % 360)
         elif key == ord("e"):
           self.set_rotate((self.rotate - 90) % 360)
+        elif key == ord("h"):
+          self.show_heatmap = not self.show_heatmap
+          if not self.show_heatmap:
+            try:                     # 窗口可能从未创建过，忽略即可
+              cv2.destroyWindow(self.heatmap_window)
+            except cv2.error:
+              pass
+          _logger.info("热力图预览: %s", "开" if self.show_heatmap else "关")
 
       if max_frames is not None and self.frames >= int(max_frames):
         break
