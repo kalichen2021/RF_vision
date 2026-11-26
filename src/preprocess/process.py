@@ -116,7 +116,59 @@ def save_dataset(out_dir: Path | str, records: list[dict],
   return lbl_path
 
 
+def _parse_margin_range(value: float | tuple[float, float]
+                        | tuple[tuple[float, float], tuple[float, float]]
+                        ) -> tuple[tuple[float, float], tuple[float, float]]:
+  """把留边参数统一成 `((横_lo, 横_hi), (纵_lo, 纵_hi))`。
+
+  支持三种写法（都做 0~0.45 的夹取，并保证区间端点有序）：
+
+  - 标量 ``0.1`` → ``((0.1, 0.1), (0.1, 0.1))``
+  - ``(lo, hi)`` → 横、纵共用同一区间
+  - ``((横_lo, 横_hi), (纵_lo, 纵_hi))`` → 分别指定
+
+  Args:
+      value: 上面任意一种写法。
+
+  Returns:
+      `((横_lo, 横_hi), (纵_lo, 纵_hi))`。
+
+  Raises:
+      ValueError: 结构无法识别。
+  """
+  def _clip(pair: tuple[float, float]) -> tuple[float, float]:
+    lo, hi = sorted(float(v) for v in pair)
+    return max(0.0, lo), min(0.45, hi)
+
+  if isinstance(value, (int, float)) and not isinstance(value, bool):
+    v = float(value)
+    return _clip((v, v)), _clip((v, v))
+  seq = list(value)
+  if len(seq) == 2 and all(isinstance(v, (int, float)) for v in seq):
+    rng = _clip((seq[0], seq[1]))          # type: ignore[arg-type]
+    return rng, rng
+  if len(seq) == 2 and all(isinstance(v, (tuple, list)) for v in seq):
+    x = _clip(tuple(seq[0]))               # type: ignore[arg-type]
+    y = _clip(tuple(seq[1]))               # type: ignore[arg-type]
+    return x, y
+  raise ValueError(
+      f"board_margin 应为标量 / (lo, hi) / ((横lo, 横hi), (纵lo, 纵hi))，"
+      f"收到 {value!r}")
+
+
 class Preprocess:
+  """把数字贴到环境图的平面上（合成样本生成器）
+
+  Args:
+      board_margin (float | tuple): 数字在板面内的留边比例。三种写法：
+
+          - 标量 ``0.1``：横纵都是 0.1；
+          - ``(lo, hi)``：横纵同一个区间；
+          - ``((横_lo, 横_hi), (纵_lo, 纵_hi))``：宽、高**分别**给区间。
+
+          每张图横/纵各抽一档，同一张图内所有数字共用。
+  """
+
   def __init__(self, distortion: tuple[float, float],
                normalize: tuple[float, float],
                area_range: tuple[float, float],
@@ -129,7 +181,9 @@ class Preprocess:
                base_depth: float | None = None,
                plane_tol: float = ppcfg.PLANE_TOL,
                board_tone: tuple[float, float] = ppcfg.BOARD_TONE,
-               board_margin: float | tuple[float, float] = ppcfg.BOARD_MARGIN,
+               board_margin: float | tuple[float, float]
+               | tuple[tuple[float, float], tuple[float, float]]
+               = ppcfg.BOARD_MARGIN,
                board_shadow: bool = ppcfg.BOARD_SHADOW,
                defocus_size_ratio: float = ppcfg.DEFOCUS_SIZE_RATIO,
                digit_count_range: tuple[int, int] | None = ppcfg.SAMPLE_DIGIT_RANGE,
@@ -171,26 +225,26 @@ class Preprocess:
     self.board_gray_flip = board_gray_flip
     self.polarity_flip_rate = float(polarity_flip_rate)
     self.min_visible_contrast = float(min_visible_contrast)
-    # 数字内缩比例：固定值或 (lo, hi) 区间；每张图抽一档，同一张图内保持一致
-    if isinstance(board_margin, (int, float)):
-      m_lo = m_hi = float(board_margin)
-    else:
-      m_lo, m_hi = sorted(float(v) for v in board_margin)
-    self.margin_range = (max(0.0, m_lo), min(0.45, m_hi))
+    # 数字留边：横/纵分别可以是固定值或区间；每张图各抽一档，同一张图内保持一致
+    self.margin_range = _parse_margin_range(board_margin)
     self.board_margin = board_margin
     # AREA_RANGE 描述的是「板位（板面）」面积，不再随留边放大：
-    # 留边只决定数字在板内的大小（数字面积 = 板位面积 × (1-2*margin)²），
+    # 留边只决定数字在板内的大小
+    # （数字面积 = 板位面积 × (1-2*横留边) × (1-2*纵留边)），
     # 这样换留边不会把板撑大、不会把数字个数稀释掉。
     self.area_scale = 1.0
 
-  def _pick_margin(self) -> float:
-    """每张图抽一个数字内缩比例（同一张图内所有数字共用）。
+  def _pick_margin(self) -> tuple[float, float]:
+    """每张图抽一档数字留边（同一张图内所有数字共用）。
 
     Returns:
-        内缩比例，已在 ``margin_range`` 范围内；区间退化时直接返回该值。
+        ``(横向留边, 纵向留边)``，均已在 ``margin_range`` 范围内；
+        区间退化时直接返回固定值。
     """
-    lo, hi = self.margin_range
-    return lo if hi <= lo else random.uniform(lo, hi)
+    (ux_lo, ux_hi), (vy_lo, vy_hi) = self.margin_range
+    mx = ux_lo if ux_hi <= ux_lo else random.uniform(ux_lo, ux_hi)
+    my = vy_lo if vy_hi <= vy_lo else random.uniform(vy_lo, vy_hi)
+    return mx, my
 
   def detect_quads(self, env_img: NDArray[np.uint8]) -> list[NDArray[np.float64]]:
     """检测环境图上的平坦区域（同一张图结果确定，批量生成时可缓存复用）
@@ -309,7 +363,7 @@ class Preprocess:
       _logger.debug("未检测到符合条件的平面区域")
       return None, []
 
-    # 每张图抽一档内缩比例：同一张图的板边留白一致；板位大小不受留边影响
+    # 每张图横/纵各抽一档留边：同一张图的板边留白一致；板位大小不受留边影响
     margin = self._pick_margin()
     area_scale = 1.0
 

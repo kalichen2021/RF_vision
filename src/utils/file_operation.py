@@ -2,7 +2,30 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+from typing import Any
+
+
+def save_json(data: Any, path: Path | str, indent: int = 2) -> Path:
+  """把字典写成 JSON 文件（先写临时文件再原子替换，不会留下半截文件）。
+
+  Args:
+      data: 任意可 JSON 序列化的对象。
+      path: 目标文件路径（父目录会自动创建）。
+      indent: 缩进空格数，便于人工阅读。
+
+  Returns:
+      实际写入的路径。
+  """
+  p = Path(path)
+  p.parent.mkdir(parents=True, exist_ok=True)
+  tmp = p.with_name(p.name + ".tmp")
+  tmp.write_text(json.dumps(data, ensure_ascii=False, indent=indent),
+                 encoding="utf-8")
+  os.replace(tmp, p)
+  return p
 
 
 def ensure_dir(path: Path | str) -> Path:

@@ -1,0 +1,149 @@
+{
+  "ckpt": "D:\\ProgramData\\Windows\\Desktop\\workspace\\增援未来\\dev\\models\\ckpt_20261126_001353_761.pt",
+  "saved_at": "2026-11-26 00:58:27",
+  "epochs_run": 23,
+  "best_metric": {
+    "name": "val loss",
+    "value": 0.063769
+  },
+  "records": "D:\\ProgramData\\Windows\\Desktop\\workspace\\增援未来\\dev\\dataset\\log\\train\\train_20261126_001353_761_finetune.json",
+  "trainer": {
+    "ckpt": "D:\\ProgramData\\Windows\\Desktop\\workspace\\增援未来\\dev\\models\\ckpt_20261126_001353_761.pt",
+    "device": "cuda",
+    "epochs": 25,
+    "lr_init": 0.0001,
+    "optimizer": "Adam",
+    "scheduler": "ReduceLROnPlateau",
+    "amp": true,
+    "trainable_params": 905683,
+    "total_params": 905683,
+    "val_interval": 1,
+    "early_stopping_patience": 4,
+    "best_metric": 0.0637688653188802
+  },
+  "training_config": {
+    "SELECT_IMGSET_ID": "0",
+    "EPOCHS_HEAD": 15,
+    "EPOCHS_FINETUNE": 25,
+    "BATCH_SIZE": 48,
+    "NUM_WORKERS": 10,
+    "PREFETCH_FACTOR": 2,
+    "PIN_MEMORY": true,
+    "USE_AMP": true,
+    "CUDNN_BENCHMARK": true,
+    "TORCH_NUM_THREADS": 4,
+    "WORKER_TORCH_THREADS": 1,
+    "TRAININGSET_RATIO": 0.8,
+    "DROPOUT": 0.3,
+    "EARLY_STOPPING_PATIENCE": 4,
+    "LR_HEAD": 0.001,
+    "LR_FINETUNE": 0.0001,
+    "VALIDATE_EVERY_EPOCH": true,
+    "VAL_INTERVAL": 1,
+    "SAVE_TRAIN_LOG": true,
+    "LR_PLATEAU_FACTOR": 0.5,
+    "LR_PLATEAU_PATIENCE": 2,
+    "LR_MIN": 1e-06,
+    "IMG_SIZE": [
+      640,
+      640
+    ]
+  },
+  "preprocess_config": {
+    "SAMPLE_GEN_NUM": 20000,
+    "SAVE_SIZE": [
+      640,
+      640
+    ],
+    "SAVE_EXT": "png",
+    "SAMPLE_COUNT_RATE": 10,
+    "SAMPLE_DIGIT_RANGE": [
+      1,
+      7
+    ],
+    "ENV_USE_SOFT_CAP": 4,
+    "ENV_USE_DECAY": 0.2,
+    "ENV_CROP_SQUARE": true,
+    "DISTORTION": [
+      0.0,
+      0.008
+    ],
+    "GEN_WORKERS": 8,
+    "GLYPH_POOL_FACTOR": 4,
+    "NORMALIZE": [
+      0.0,
+      0.0
+    ],
+    "AREA_RANGE": [
+      8000,
+      16000
+    ],
+    "THICKNESS_CHOICES": [
+      0,
+      0,
+      1,
+      1,
+      2,
+      3,
+      3,
+      4,
+      4
+    ],
+    "CANVAS_CHOICES": [
+      48,
+      64,
+      64,
+      80
+    ],
+    "FONT_VARIANTS": 5,
+    "QUADS_SELECT_RATE": 0.5,
+    "CONTRAST_RANGE": [
+      0.35,
+      0.9
+    ],
+    "FUSE_ALPHA": [
+      0.55,
+      0.95
+    ],
+    "DEFOCUS_STRENGTH": 0.3,
+    "DEFOCUS_MAX_SIGMA": 4.0,
+    "DEFOCUS_PERSPECTIVE": 0.5,
+    "DEFOCUS_SIZE_RATIO": 0.06,
+    "BOARD_GRAY": [
+      190,
+      240
+    ],
+    "POLARITY_FLIP_RATE": 0,
+    "BOARD_GRAY_FLIP": [
+      25,
+      70
+    ],
+    "MIN_VISIBLE_CONTRAST": 0.12,
+    "BOARD_TONE": [
+      12,
+      30
+    ],
+    "BOARD_MARGIN": [
+      [
+        0.3,
+        0.36
+      ],
+      [
+        0.33,
+        0.39
+      ]
+    ],
+    "BOARD_SHADOW": false,
+    "PLANE_TOL": 0.12,
+    "BASE_DEPTH": null
+  },
+  "stage": "finetune",
+  "dataset": {
+    "dir": "D:\\ProgramData\\Windows\\Desktop\\workspace\\增援未来\\dev\\dataset\\processed\\20261125_212831_641",
+    "name": "20261125_212831_641",
+    "labels": "D:\\ProgramData\\Windows\\Desktop\\workspace\\增援未来\\dev\\dataset\\processed\\20261125_212831_641\\labels.json",
+    "n_train": 16000,
+    "n_val": 4000
+  },
+  "note": "training_config / preprocess_config 取自当前 configs/*.py；preprocess_config 不一定等于该数据集生成时的参数。"
+}

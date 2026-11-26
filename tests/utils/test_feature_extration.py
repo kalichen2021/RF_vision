@@ -178,6 +178,17 @@ class TestBoard:
     inner = inset_quad(quad, margin=0.2)
     assert np.allclose(inner, [[20, 20], [80, 20], [80, 80], [20, 80]])
 
+  def test_inset_quad_supports_anisotropic_margin(self) -> None:
+    """横向 / 纵向可以给不同的留边比例（数字不必是正方形占位）"""
+    quad = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], np.float64)
+    inner = inset_quad(quad, margin=(0.1, 0.3))
+    assert np.allclose(inner, [[10, 30], [90, 30], [90, 70], [10, 70]])
+
+  def test_inset_quad_rejects_bad_margin(self) -> None:
+    quad = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], np.float64)
+    with pytest.raises(ValueError):
+      inset_quad(quad, margin=(0.1, 0.2, 0.3))
+
   def test_draw_board_recolors_inside_only(self) -> None:
     env = np.full((60, 60), 100, np.uint8)
     quad = np.array([[20, 20], [40, 20], [40, 40], [20, 40]], np.float64)

@@ -65,4 +65,4 @@ class TrainingConfig:
   LR_MIN: float = 1e-6              # 降 lr 的下限
 
   # 输入尺寸 (高, 宽)：训练、推理、摄像头必须一致
-  IMG_SIZE: tuple[int, int] = (384, 384)
+  IMG_SIZE: tuple[int, int] = (640, 640)

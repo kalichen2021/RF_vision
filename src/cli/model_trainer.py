@@ -96,8 +96,14 @@ def build_opt(model: "torch.nn.Module", lr: float | None = None
 
 def make_trainer(epochs: int, ckpt_path: str | Path, dev: str,
                  records_path: str | Path | None = None,
-                 val_interval: int = 1) -> "Trainer":
-  """每阶段一个 Trainer（每 val_interval 轮验证一次，结果逐轮写 JSON）"""
+                 val_interval: int = 1,
+                 extra_meta: dict | None = None) -> "Trainer":
+  """每阶段一个 Trainer（每 val_interval 轮验证一次，结果逐轮写 JSON）
+
+  Args:
+      extra_meta: 额外写进权重旁边 `ckpt_<uuid>.json` 的信息
+          （训练 / 预处理配置快照、阶段名等）；None 表示只写 Trainer 自身字段。
+  """
   from configs.training_cfg import TrainingConfig as tc
   from src.training.train import Trainer
 
@@ -105,7 +111,8 @@ def make_trainer(epochs: int, ckpt_path: str | Path, dev: str,
                  early_stopping_patience=tc.EARLY_STOPPING_PATIENCE,
                  ckpt_path=ckpt_path, use_amp=tc.USE_AMP,
                  cudnn_benchmark=tc.CUDNN_BENCHMARK,
-                 val_interval=val_interval, records_path=records_path)
+                 val_interval=val_interval, records_path=records_path,
+                 extra_meta=extra_meta)
 
 
 def make_scheduler(opt: "torch.optim.Optimizer"
@@ -121,6 +128,39 @@ def make_scheduler(opt: "torch.optim.Optimizer"
   return torch.optim.lr_scheduler.ReduceLROnPlateau(
       opt, mode="min", factor=float(tc.LR_PLATEAU_FACTOR),
       patience=int(tc.LR_PLATEAU_PATIENCE), min_lr=float(tc.LR_MIN))
+
+
+def build_run_meta(stage: str, n_train: int, n_val: int) -> dict:
+  """拼出「这份权重是怎么训出来的」快照，供 Trainer 写到 `ckpt_<uuid>.json`。
+
+  Args:
+      stage: 阶段名（`head` / `finetune`），同一份 ckpt 会被两个阶段依次覆写。
+      n_train: 训练集样本数。
+      n_val: 验证集样本数。
+
+  Returns:
+      可直接 JSON 序列化的字典。
+  """
+  from configs.path import PathConfig
+  from configs.preprocess_cfg import PreprocessConfig
+  from configs.training_cfg import TrainingConfig
+  from src.utils.config_tools import configs_snapshot
+
+  meta = configs_snapshot(training_config=TrainingConfig,
+                          preprocess_config=PreprocessConfig)
+  meta["stage"] = stage
+  meta["dataset"] = {
+      "dir": str(PathConfig.SELECT_IMGSET),
+      "name": PathConfig.SELECT_IMGSET.name,
+      "labels": str(PathConfig.DATASET_LABEL_JSON),
+      "n_train": int(n_train),
+      "n_val": int(n_val),
+  }
+  # 预处理参数是「当前 configs/preprocess_cfg.py 的值」，不一定等于该数据集
+  # 生成时的值；实际生成参数以 labels.json 里的记录为准，这里只作为参考
+  meta["note"] = ("training_config / preprocess_config 取自当前 configs/*.py；"
+                  "preprocess_config 不一定等于该数据集生成时的参数。")
+  return meta
 
 
 def main() -> None:
@@ -150,8 +190,10 @@ def main() -> None:
   print(f"使用数据集：{PathConfig.SELECT_IMGSET}"
         f" | {len(ds)} + {len(ds_test)} = {len(ds) + len(ds_test)} 张")
 
-  # 验证集：每 VAL_INTERVAL 轮跑一次（best / 早停 / 降 lr 都盯它）
+  # 验证集：每 VAL_INTERVAL 轮跑一次（best / 早停 / 降 lr **只**看它）
   val_dl = dl_test if tc.VALIDATE_EVERY_EPOCH else None
+  if val_dl is None:
+    print("警告：VALIDATE_EVERY_EPOCH=False，本次训练不会选 best / 不会早停 / 不降 lr")
   # 训练记录 JSON：两阶段各一份，逐轮追加写盘（dataset/log/train/）
   train_log_dir = PathConfig.LOG_DIR / "train"
   head_record = (train_log_dir / f"train_{LogConfig.UUID}_head.json"
@@ -160,19 +202,23 @@ def main() -> None:
                      if tc.SAVE_TRAIN_LOG else None)
   if head_record is not None:
     print(f"训练记录会实时写入: {train_log_dir}\\train_{LogConfig.UUID}_*.json")
+  print(f"权重旁的参数快照: {ckpt_path.with_suffix('.json')}")
 
   # 阶段一：冻结 backbone，只训三个 head（学习率可以大一点，轮数少一些）
   opt = build_opt(model, tc.LR_HEAD)
   sched = make_scheduler(opt)
   make_trainer(tc.EPOCHS_HEAD, ckpt_path, dev,
                records_path=head_record,
-               val_interval=tc.VAL_INTERVAL).train(
+               val_interval=tc.VAL_INTERVAL,
+               extra_meta=build_run_meta("head", len(ds), len(ds_test))).train(
       model, dl, opt, sched, freeze_backbone=True, val_dataloader=val_dl)
 
   # 阶段二：解冻 backbone 整体微调（学习率降一个量级，轮数多一些）
   trainer = make_trainer(tc.EPOCHS_FINETUNE, ckpt_path, dev,
                          records_path=finetune_record,
-                         val_interval=tc.VAL_INTERVAL)
+                         val_interval=tc.VAL_INTERVAL,
+                         extra_meta=build_run_meta("finetune", len(ds),
+                                                   len(ds_test)))
   trainer.unfreeze_backbone(model)
   opt = build_opt(model, tc.LR_FINETUNE)
   sched = make_scheduler(opt)

@@ -7,6 +7,7 @@ from typing import Any, Iterable
 import torch
 from torch.utils.data import DataLoader
 
+from src.utils.file_operation import save_json
 from src.utils.logging_tools import get_logger
 
 from .dataset import batch_to_torch
@@ -22,7 +23,13 @@ class Trainer:
                ckpt_path: str | Path = "ckpt_last.pt",
                use_amp: bool = False, cudnn_benchmark: bool = False,
                val_interval: int = 1,
-               records_path: str | Path | None = None) -> None:
+               records_path: str | Path | None = None,
+               extra_meta: dict[str, Any] | None = None) -> None:
+    """
+    Args:
+        extra_meta: 额外写进权重旁边 `*.json` 的信息（如训练 / 预处理配置）；
+            None 表示只写 Trainer 自己知道的字段。
+    """
     self.epochs = epochs
     self.device = device
     self.ckpt_path = ckpt_path
@@ -32,6 +39,8 @@ class Trainer:
     self.val_interval = max(1, int(val_interval))
     # 训练记录 JSON（每轮 train / val 指标都会追加写盘）；None 表示不写
     self.records_path = None if records_path is None else Path(records_path)
+    # 额外的参数快照（训练用到的 configs），保存权重时一并存到 `*.json`
+    self.extra_meta: dict[str, Any] = dict(extra_meta or {})
     self._records: list[dict] = []
     self._meta: dict[str, Any] = {}
     self._best_metric = float("inf")
@@ -211,9 +220,9 @@ class Trainer:
         optimizer (torch.optim.Optimizer): 优化器（解冻后需重建）
         scheduler (LRScheduler): 学习率调度器（支持 ReduceLROnPlateau）
         freeze_backbone (bool): True 时先冻结整个 backbone
-        val_dataloader (DataLoader | None): 验证集；给定时每轮跑一次 eval，
-            并**用它**决定 best 权重 / 早停 / 调度器（训练 loss 受 dropout 与
-            BN batch 统计影响，不能代表泛化能力）。None 时退回训练 loss。
+        val_dataloader (DataLoader | None): 验证集。**早停 / best 权重 / 降 lr 只看验证 loss**：
+            训练 loss 受 dropout 与 BN batch 统计影响，不代表泛化能力。
+            为 None 时本轮训练不做 best 选择 / 早停 / 降 lr（也不再拿训练 loss 凑数）。
     """
     model.to(self.device)
     if freeze_backbone:
@@ -249,11 +258,14 @@ class Trainer:
         "early_stopping_patience": self.early_stopping_patience,
     }
 
-    # 监控指标：有验证集时是 val loss，否则退回训练 loss
+    # 监控指标固定为验证集 loss：没有验证集就不早停（绝不用训练 loss 代替）
+    if val_dataloader is None:
+      _logger.warning("未提供验证集：本轮训练不会选择 best / 不会早停 / 不降 lr")
+    metric_name = "val loss"
     best_metric = float("inf")
-    metric_name = "val loss" if val_dataloader is not None else "loss"
     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     bad_epochs = 0
+    epochs_run = self.epochs        # 实际跑了几轮（早停时会被改小）
 
     for epoch in range(self.epochs):
       model.train()
@@ -291,7 +303,7 @@ class Trainer:
       loss_avg, hm_avg, reg_avg, cls_avg = (v / n for v in agg)
 
       # 每 val_interval 轮（以及最后一轮）跑一次验证：
-      # best / 早停 / 降 lr 都只看验证结果；没有验证集的训练用训练 loss 兜底
+      # 早停 / best 权重 / 降 lr **只**看验证 loss（没有验证集就全部跳过）
       do_val = val_dataloader is not None and (
           (epoch + 1) % self.val_interval == 0 or epoch == self.epochs - 1)
       val_loss = val_hm = val_reg = val_cls = None
@@ -301,9 +313,6 @@ class Trainer:
         metric: float | None = val_loss
         val_note = (f" | Val Loss: {val_loss:.4f}, Heatmap: {val_hm:.4f}, "
                     f"Offset: {val_reg:.4f}, Classification: {val_cls:.4f}")
-      elif val_dataloader is None:
-        metric = loss_avg
-        val_note = ""
       else:
         metric = None
         val_note = ""
@@ -314,7 +323,7 @@ class Trainer:
       gpu_ratio = max(0.0, 1.0 - data_wait / max(epoch_time, 1e-6))
       lr_now = optimizer.param_groups[0]["lr"]
 
-      # 早停只在有验证结果的轮次判断（没跑验证的轮次不动 bad_epochs）
+      # 早停只看验证结果：没跑验证的轮次（val_interval>1）不动 bad_epochs
       is_best = False
       if metric is not None:
         if metric < best_metric:
@@ -325,6 +334,8 @@ class Trainer:
         else:
           bad_epochs += 1
           note = f"  (no improve {bad_epochs}/{self.early_stopping_patience})"
+      elif val_dataloader is None:
+        note = "  (no val)"
       else:
         note = "  (skip val)"
       self._best_metric = best_metric
@@ -355,6 +366,7 @@ class Trainer:
       if bad_epochs >= self.early_stopping_patience:
         _logger.info("Early stopping at epoch %d：%s 已连续 %d 轮未下降",
                      epoch + 1, metric_name, bad_epochs)
+        epochs_run = epoch + 1
         break
 
     # 保存「最好的一轮」而不是最后一轮：早停时最后一轮往往已经抖坏了
@@ -367,9 +379,45 @@ class Trainer:
         "dropout": getattr(model, "dropout_p", None),
     }, self.ckpt_path)
     _logger.info("权重已保存: %s  (best %s %.4f)",
-                 self.ckpt_path, metric_name, best_metric)
+                 self.ckpt_path, metric_name,
+                 best_metric if best_metric != float("inf") else float("nan"))
+    # 在权重旁边写一份同名 json：这次训练用的超参 + 额外的配置快照
+    self._save_ckpt_meta(best_metric, metric_name, epochs_run)
     self._save_records()
     return best_metric
+
+  def _save_ckpt_meta(self, best_metric: float, metric_name: str,
+                      epochs_run: int | None = None) -> Path:
+    """把「产生这份权重的那次训练」的参数写成 `ckpt_xxx.json`。
+
+    内容 = Trainer 自身的启动信息（`_meta`）+ `extra_meta`（CLI 传入的
+    TrainingConfig / PreprocessConfig 快照）+ 最优轮与记录文件位置。
+    这样以后拿到一个 ckpt，旁边就能看到它当时是怎么训、数据是怎么造的。
+
+    Args:
+        best_metric: 保存的这一轮对应的监控指标（验证 loss）。
+        metric_name: 监控指标名（固定为 "val loss"）。
+        epochs_run: 实际跑了几轮（None 表示取计划轮数）。
+
+    Returns:
+        写好的 JSON 路径。
+    """
+    ckpt = Path(self.ckpt_path)
+    payload: dict[str, Any] = {
+        "ckpt": str(ckpt),
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "epochs_run": self.epochs if epochs_run is None else int(epochs_run),
+        "best_metric": {
+            "name": metric_name,
+            "value": (None if best_metric == float("inf")
+                      else round(float(best_metric), 6)),
+        },
+        "records": None if self.records_path is None else str(self.records_path),
+        "trainer": dict(self._meta),
+    }
+    # extra_meta 放后面：CLI 传的配置快照优先级更高（同名字段以它为准）
+    payload.update(self.extra_meta)
+    return save_json(payload, ckpt.with_suffix(".json"))
 
   def evaluate(self, model: CenterNetDigit, dataloader: DataLoader,
                ckpt_path: str | Path | None = None) -> float:

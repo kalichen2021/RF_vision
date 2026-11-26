@@ -71,7 +71,7 @@ dev/
 │  ├─ raw/env/              # 原始环境图（jpg），合成样本的背景来源
 │  ├─ processed/<uuid>/     # 合成产出：样本图 + labels.json
 │  └─ log/                  # 训练记录 train/、曲线 plots/、推理图 infer/、摄像头快照 camera/
-├─ models/                  # 训练产出的权重 ckpt_<uuid>.pt
+├─ models/                  # 训练产出的权重 ckpt_<uuid>.pt + 参数快照 ckpt_<uuid>.json
 └─ tests/                   # pytest（与 src 结构镜像）
 ```
 
@@ -192,8 +192,12 @@ dataset/processed/20261125_101500_123/
 ```
 
 样本外观由 `configs/preprocess_cfg.py` 控制（数字大小 `AREA_RANGE`、每图数字数 `SAMPLE_DIGIT_RANGE`、
-是否画板 `BOARD_*`、极性 `POLARITY_FLIP_RATE`、落盘尺寸 `SAVE_SIZE` 等）。
+是否画板 / 留边 `BOARD_*`、极性 `POLARITY_FLIP_RATE`、落盘尺寸 `SAVE_SIZE` 等）。
 **改完 `SAVE_SIZE` / 极性等参数必须重新生成数据**，旧数据集不会自动变。
+
+其中数字在板内的留边 `BOARD_MARGIN` **宽、高分开给区间**，例如默认的
+`((0.08, 0.20), (0.08, 0.20))` = 横向留边 8%~20%、纵向留边 8%~20%，每张图各抽一档，
+所以同一批数据里数字占位的宽高比并不总是 1:1。写单个数字（如 `0.1`）或 `(lo, hi)` 仍兼容。
 
 ### 第 2 步：训练
 
@@ -209,7 +213,21 @@ python src/cli/model_trainer.py
 | 2 `finetune` | 解冻主干整体微调 | `EPOCHS_FINETUNE=25` / `LR_FINETUNE=1e-4` |
 
 每轮都会在验证集上算 loss：**保存权重、早停、降学习率全部只看 val loss**（训练 loss 受 Dropout/BN 影响，不能代表泛化）。
-最终写入 `models/ckpt_<uuid>.pt` 的是「验证 loss 最好那一轮」的权重，不是最后一轮。
+早停规则：验证 loss 连续 `EARLY_STOPPING_PATIENCE` 轮没有刷新最好值就停；
+如果关掉验证（`VALIDATE_EVERY_EPOCH=False`），则本次训练**不会**选 best / 不会早停 / 不降 lr（绝不会拿训练 loss 代替）。
+
+产物有两个，同名同目录，互为配套：
+
+```
+models/
+├─ ckpt_<uuid>.pt     # 「验证 loss 最好那一轮」的权重（不是最后一轮）
+└─ ckpt_<uuid>.json   # 产生这份权重的全部参数快照：训练超参 + DataLoader 配置
+                      # + PreprocessConfig + 数据集路径/样本数 + 最优轮/实际轮数/耗时
+```
+
+`ckpt_<uuid>.json` 里 `preprocess_config` 取自当时的 `configs/preprocess_cfg.py`，
+不保证等于该数据集**生成时**的参数（同一个数据集可以被多次训练复用）；
+真正描述数据的是 `dataset/processed/<uuid>/labels.json`。
 
 日志形如：
 
@@ -220,6 +238,7 @@ Epoch 2/15, Loss: 0.7401, Heatmap: 0.4808, Offset: 0.2184, Classification: 0.040
 
 - `等数据` = 这一轮里 GPU 干等 DataLoader 的时间；`GPU≈` ≈ `1 - 等数据/单轮耗时`。
 - `(best)` 表示该轮刷新了最好 val loss（权重已更新）；`(no improve k/patience)` 表示连续没变好，达到 `EARLY_STOPPING_PATIENCE` 就早停。
+- `(skip val)` = 本轮按 `VAL_INTERVAL` 跳过验证；`(no val)` = 压根没给验证集（此时不早停）。
 
 参考耗时（RTX 3060 Laptop，`BATCH_SIZE=48 / NUM_WORKERS=10`，2 万张数据集）：阶段一约 16 min，阶段二约 29 min。
 

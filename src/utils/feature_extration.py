@@ -208,7 +208,7 @@ def segment_quad(quad: NDArray[np.floating],
     cell_jitter (float): 切割线位置的抖动幅度（0~1）；>0 时同一区域里每块板的长宽都不同。
         Defaults to 0.18.
     area_scale (float): `area_range` 与板位面积的换算系数。当 `area_range` 描述的是
-        「数字区域」面积时传 `(1 - 2*BOARD_MARGIN)**2`，函数内部会把板位目标放大到
+        「数字区域」面积时传 `(1 - 2*留边_横) * (1 - 2*留边_纵)`，函数内部会把板位目标放大到
         `area_range / area_scale`，使数字内缩后的面积正好落回区间。默认 1（描述板位）。
     min_cells (int): 期望至少切出的板位数。用于「每张图放 N 个数字」——多需要几块
         就优先选更细的网格，而不是只切一块最大的板。默认 1。
@@ -798,21 +798,36 @@ def quad_point(quad: NDArray[np.floating], u: float, v: float
 
 
 # TODO: 使margin支持负数， 由于源数字也有原始边距
-def inset_quad(quad: NDArray[np.floating], margin: float = 0.18
+def inset_quad(quad: NDArray[np.floating],
+               margin: float | Sequence[float] = 0.18
                ) -> NDArray[np.float64]:
-  """把四边形按参数比例向内收缩，得到数字在板面上占据的区域
+  """把四边形按比例向内收缩，得到数字在板面上占据的区域
 
   Args:
       quad (NDArray[np.float64]): 板面四边形，(4, 2)，[左上, 右上, 右下, 左下]
-      margin (float): 内缩比例（0~0.45），模拟数字与板边的留白
+      margin (float | Sequence[float]): 内缩比例（0~0.45）。
+          标量 = 横纵相同；``(横, 纵)`` = 两个方向分别内缩
+          （横作用在 u 方向 = 左→右，纵作用在 v 方向 = 上→下）
 
   Returns:
       NDArray[np.float64]: 内缩后的四边形，(4, 2)
+
+  Raises:
+      ValueError: ``margin`` 元素个数既不是 1 也不是 2。
   """
-  m = float(np.clip(margin, 0.0, 0.45))
-  lo, hi = m, 1.0 - m
-  return np.array([quad_point(quad, lo, lo), quad_point(quad, hi, lo),
-                   quad_point(quad, hi, hi), quad_point(quad, lo, hi)],
+  vals = np.atleast_1d(np.asarray(margin, dtype=np.float64)).ravel()
+  if vals.size == 1:
+    mx = my = float(vals[0])
+  elif vals.size == 2:
+    mx, my = float(vals[0]), float(vals[1])
+  else:
+    raise ValueError(f"margin 应为标量或 (横, 纵)，收到 {margin!r}")
+  mx = float(np.clip(mx, 0.0, 0.45))
+  my = float(np.clip(my, 0.0, 0.45))
+  u0, u1 = mx, 1.0 - mx
+  v0, v1 = my, 1.0 - my
+  return np.array([quad_point(quad, u0, v0), quad_point(quad, u1, v0),
+                   quad_point(quad, u1, v1), quad_point(quad, u0, v1)],
                   dtype=np.float64)
 
 

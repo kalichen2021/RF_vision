@@ -18,7 +18,7 @@ class PreprocessConfig:
   # 落盘前先缩放到这个尺寸 (高, 宽)：训练输入本来就是 384，
   # 存 384 比存 720 的 PNG **解码快 3~4 倍**（读图是训练数据管线的大头）；
   # None = 保持原图尺寸（以后想换 512 训练时才需要）
-  SAVE_SIZE: tuple[int, int] | None = (384, 384)
+  SAVE_SIZE: tuple[int, int] | None = (640, 640)
   # 样本图格式："png"（无损）或 "jpg"（解码更快、体积更小，但轻微压缩）
   SAVE_EXT: str = "png"
   # 数字类别数（贴图池覆盖 0 ~ N-1，需要 >= 10 才能覆盖 0~9）
@@ -38,7 +38,7 @@ class PreprocessConfig:
 
   # --------QUADS---------（目标：模拟「板上写着数字」的平面放置）
   # 畸变容忍度（映射为允许长宽比 1.5 + 3.5*d），板子接近矩形，取偏小值
-  DISTORTION: tuple[float, float] = (0.0, 0.01)
+  DISTORTION: tuple[float, float] = (0.0, 0.008)
 
   # --------生成速度---------
   # 并行线程数（1 = 单线程）。融合 / 切分是 CPU 密集，线程数 ≈ 物理核数即可；
@@ -50,8 +50,8 @@ class PreprocessConfig:
   # 网格弯曲度：板是刚体，必须为 0，否则切出来的格子不是平面四边形的透视投影
   NORMALIZE: tuple[float, float] = (0.0, 0.0)
   # 板位（板面）四边形面积（像素²）：<1 时按占平坦区域面积的比例解释；
-  # 数字面积 = 板位面积 × (1 - 2*BOARD_MARGIN)²，换留边不会改变板位大小
-  AREA_RANGE: tuple[int, int] = (8000, 100000)
+  # 数字面积 = 板位面积 × (1 - 2*留边_横) × (1 - 2*留边_纵)，换留边不会改变板位大小
+  AREA_RANGE: tuple[int, int] = (8000, 16000)
   # 笔画粗细 / 画布尺寸的候选，用来增加字形多样性
   THICKNESS_CHOICES: tuple[int, ...] = (0, 0, 1, 1, 2, 3, 3, 4, 4)
   CANVAS_CHOICES: tuple[int, ...] = (48, 64, 64, 80)
@@ -88,9 +88,12 @@ class PreprocessConfig:
   MIN_VISIBLE_CONTRAST: float = 0.12
   # 旧参数：板面相对背景的亮度偏移，仅当 BOARD_GRAY 为 None 时生效
   BOARD_TONE: tuple[int, int] = (12, 30)
-  # 数字在板面内的内缩比例（即板子给数字留的边距），支持区间：
-  # 每张图抽一档，同一张图内所有数字共用；0 = 数字铺满板面
-  BOARD_MARGIN: tuple[float, float] = (0.08, 0.2)
+  # 数字在板面内的留边（内缩）比例，**宽、高分别给区间**：
+  #   ((横_最小, 横_最大), (纵_最小, 纵_最大))
+  # 每张图横/纵各抽一档，同一张图内所有数字共用；0 = 数字在该方向铺满板面。
+  # 也兼容旧写法：写单个数字 = 横纵固定值，写 (lo, hi) = 横纵同一个区间。
+  BOARD_MARGIN: tuple[tuple[float, float], tuple[float, float]] = (
+      (0.3, 0.36), (0.33, 0.39))
   # 是否给板面画软投影（能提供更强的平面 / 遮挡线索）
   BOARD_SHADOW: bool = False
   # 判定「同一平面」的深度容差（0~1）
