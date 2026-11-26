@@ -52,7 +52,8 @@ def test_load_model_missing_checkpoint(tmp_path) -> None:
 
   with pytest.raises(FileNotFoundError, match="找不到 checkpoint"):
     trainer._load_model(model)
-    
+
+
 def test_single(tmp_path) -> None:
   """只训练一次（空 dataloader：验证前向前的准备流程不报错）"""
   model = CenterNetDigit(num_classes=10)
@@ -95,7 +96,7 @@ def test_early_stopping_uses_val_loss(tmp_path, monkeypatch) -> None:
                     early_stopping_patience=2, val_interval=1)
   vals = iter([1.0, 0.9, 1.1, 1.2])        # 第 2 轮最优，之后不再变好
   monkeypatch.setattr(trainer, "_eval_losses",
-                      lambda *a, **k: (next(vals), 0.0, 0.0, 0.0))
+                      lambda *a, **k: (next(vals), 0.0, 0.0, 0.0, 0.5))
   opt = torch.optim.Adam(model.parameters(), lr=1e-3)
   sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=1)
 

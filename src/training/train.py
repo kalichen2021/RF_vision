@@ -153,7 +153,7 @@ class Trainer:
 
   @torch.no_grad()
   def _eval_losses(self, model: CenterNetDigit, dataloader: DataLoader
-                   ) -> tuple[float, float, float, float]:
+                   ) -> tuple[float, float, float, float, float]:
     """在给定 dataloader 上跑一遍 eval 模式，返回四路平均 loss
 
     与训练阶段的区别：`model.eval()` 关掉 head 里的 dropout、backbone 的 BN
@@ -171,6 +171,7 @@ class Trainer:
     device_type = "cuda" if str(self.device).startswith("cuda") else "cpu"
     amp_enabled = bool(self.use_amp and device_type == "cuda")
     agg = [.0, .0, .0, .0]  # loss, heatmap, offset, cls
+    peak_sum, peak_n = 0.0, 0.0     # GT 中心格预测值的「总和」与「个数」
     for batch in dataloader:
       imgs, quads_list, digits_list = batch_to_torch(batch)
       imgs = imgs.to(self.device, non_blocking=True)
@@ -187,13 +188,18 @@ class Trainer:
         loss, parts = total_loss(hm_p, reg_p, cls_p, hm_t, reg_t, cls_t, mask)
       for i, v in enumerate((loss.item(), *parts)):
         agg[i] += v
+        pos = mask.bool()                      # (B, 48, 48) 的 True/False，True = 真实中心格
+        if pos.any():                          # 万一这批发图里一个数字都没有，就跳过
+          peak_sum += float(hm_p.squeeze(1)[pos].float().sum())
+          peak_n += float(pos.sum())
 
     if was_training:
       # 验证完必须切回训练态，否则 dropout 会被一直关掉；冻结块的 BN 也要复原
       model.train()
       self._set_frozen_bn_eval(model)
     n = max(len(dataloader), 1)
-    return tuple(v / n for v in agg)
+    hm_peak = peak_sum / peak_n if peak_n else float("nan")
+    return agg[0] / n, agg[1] / n, agg[2] / n, agg[3] / n, hm_peak
 
   def train(self,
             model: CenterNetDigit,
@@ -263,7 +269,8 @@ class Trainer:
       _logger.warning("未提供验证集：本轮训练不会选择 best / 不会早停 / 不降 lr")
     metric_name = "val loss"
     best_metric = float("inf")
-    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    best_state = {k: v.detach().cpu().clone()
+                  for k, v in model.state_dict().items()}
     bad_epochs = 0
     epochs_run = self.epochs        # 实际跑了几轮（早停时会被改小）
 
@@ -289,7 +296,8 @@ class Trainer:
 
         with torch.amp.autocast(device_type, enabled=amp_enabled):
           hm_p, reg_p, cls_p = model(imgs)
-          loss, parts = total_loss(hm_p, reg_p, cls_p, hm_t, reg_t, cls_t, mask)
+          loss, parts = total_loss(
+              hm_p, reg_p, cls_p, hm_t, reg_t, cls_t, mask)
 
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
@@ -306,13 +314,13 @@ class Trainer:
       # 早停 / best 权重 / 降 lr **只**看验证 loss（没有验证集就全部跳过）
       do_val = val_dataloader is not None and (
           (epoch + 1) % self.val_interval == 0 or epoch == self.epochs - 1)
-      val_loss = val_hm = val_reg = val_cls = None
+      val_loss = val_hm = val_reg = val_cls = val_peak = None
       if do_val:
-        val_loss, val_hm, val_reg, val_cls = self._eval_losses(
+        val_loss, val_hm, val_reg, val_cls, val_peak = self._eval_losses(
             model, val_dataloader)
         metric: float | None = val_loss
         val_note = (f" | Val Loss: {val_loss:.4f}, Heatmap: {val_hm:.4f}, "
-                    f"Offset: {val_reg:.4f}, Classification: {val_cls:.4f}")
+                    f"Offset: {val_reg:.4f}, Classification: {val_cls:.4f}, GT峰值: {val_peak:.3f}")
       else:
         metric = None
         val_note = ""
@@ -354,6 +362,7 @@ class Trainer:
           "gpu_ratio": round(gpu_ratio, 3),
           "is_best": is_best,
           "bad_epochs": bad_epochs,
+          "hm_peak": None if val_peak is None else round(val_peak, 6),
       })
       self._save_records()
 
@@ -430,7 +439,7 @@ class Trainer:
     """
     model = self._load_model(model, ckpt_path)
     model.to(self.device)
-    loss_avg, hm_avg, reg_avg, cls_avg = self._eval_losses(model, dataloader)
+    loss_avg, hm_avg, reg_avg, cls_avg, hm_peak_avg = self._eval_losses(model, dataloader)
     _logger.info("Evaluation Loss: %.4f, Heatmap: %.4f, Offset: %.4f, "
-                 "Classification: %.4f", loss_avg, hm_avg, reg_avg, cls_avg)
+                 "Classification: %.4f, GT峰值: %.3f", loss_avg, hm_avg, reg_avg, cls_avg, hm_peak_avg)
     return loss_avg

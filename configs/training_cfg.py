@@ -26,7 +26,7 @@ class TrainingConfig:
   # DataLoader 子进程数：0 = 主进程里读图（GPU 会等 CPU，利用率自然低）
   # 每个进程常驻约 0.6~1GB（torch + cv2），16G 内存的机器不要超过 4~6，
   # 否则会和训练主进程 / CUDA 抢内存，表现为主机内存暴涨、GPU 反而空转
-  NUM_WORKERS: int = 10
+  NUM_WORKERS: int = 4
   # 每个 worker 预取的 batch 数：越大越能掩盖读图抖动，但内存线性增长
   PREFETCH_FACTOR: int = 2
   # 锁页内存：配合 .to(non_blocking=True) 做异步 H2D 拷贝（仅 CUDA 有意义）

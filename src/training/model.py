@@ -52,7 +52,7 @@ class CenterNetDigit(nn.Module):
       """Conv3x3 -> ReLU -> [Dropout2d] -> Conv1x1 [-> Sigmoid]"""
       layers: list[nn.Module] = [
           nn.Conv2d(128, 64, 3, padding=1),
-          nn.ReLU(inplace=True),
+          nn.LeakyReLU(0.1, inplace=True),
       ]
       if dropout > 0.0:
         layers.append(nn.Dropout2d(dropout))
@@ -63,6 +63,10 @@ class CenterNetDigit(nn.Module):
 
     # 每格"是数字中心"的概率 out: (B,1,h,w)
     self.hm_head = _head(1, sigmoid=True)
+    # 最后一层 Conv1x1 的 bias 从 -2.19 起步（sigmoid≈0.1）；
+    # 否则训练后它会被推成正数，让"死区"漏出 0.72 的假高分
+    nn.init.constant_(
+        [m for m in self.hm_head if isinstance(m, nn.Conv2d)][-1].bias, -2.19)
     # 中心到 4 点的偏移 (4点×x,y) out: (B,8,h,w)
     self.reg_head =_head(8)
     # 每格 10 类 digits (B,10,h,w)
@@ -182,7 +186,9 @@ def focal_loss(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
   """
   pos = gt.eq(1).float()
   neg = gt.lt(1).float()
-  pred = pred.clamp(1e-6, 1 - 1e-6)
+  # 先转 fp32 再 clamp：fp16 表示不了 1-1e-6（会 round 成 1.0），
+  # 于是 log(1-p) = log(0) = -inf，训练 loss 直接变 nan
+  pred = pred.float().clamp(1e-6, 1 - 1e-6)
   pos_loss = -torch.log(pred) * torch.pow(1 - pred, 2) * pos
   neg_loss = -torch.log(1 - pred) * torch.pow(pred,
                                               2) * torch.pow(1 - gt, 4)*neg
