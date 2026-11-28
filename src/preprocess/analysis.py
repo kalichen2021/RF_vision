@@ -131,6 +131,61 @@ def quad_aspect(quad: Sequence[Sequence[float]]) -> float:
   return float(max(w, h) / lo)
 
 
+def quad_persp(quad: Sequence[Sequence[float]]) -> float:
+  """透视强度：对边长度之差 / 对边平均长度（0 = 无透视，越大透视越强）。
+
+  生成侧的 `POSE_DISTANCE` 越大、透视越弱，该值就越接近 0；
+  也可以用它把合成数据和实拍照片放到同一尺度上对比。
+
+  Args:
+      quad: 四边形 `(4, 2)`，顺序 [左上, 右上, 右下, 左下]。
+
+  Returns:
+      横、纵两个方向透视强度的平均值（>=0）。
+  """
+  p = np.asarray(quad, dtype=float).reshape(4, 2)
+  top = float(np.linalg.norm(p[1] - p[0]))
+  bot = float(np.linalg.norm(p[2] - p[3]))
+  left = float(np.linalg.norm(p[3] - p[0]))
+  right = float(np.linalg.norm(p[2] - p[1]))
+  m1 = abs(top - bot) / max((top + bot) / 2.0, 1e-6)
+  m2 = abs(left - right) / max((left + right) / 2.0, 1e-6)
+  return float(0.5 * (m1 + m2))
+
+
+def quad_roll(quad: Sequence[Sequence[float]]) -> float:
+  """面内旋转角（度）：上边与水平方向的夹角，范围 (-90, 90]。
+
+  对应生成侧的 Z 轴（面内滚转）；正负号代表往哪边转。
+
+  Args:
+      quad: 四边形 `(4, 2)`。
+
+  Returns:
+      角度（度）。
+  """
+  p = np.asarray(quad, dtype=float).reshape(4, 2)
+  d = p[1] - p[0]
+  return float(np.degrees(np.arctan2(d[1], d[0])))
+
+
+def quad_keystone(quad: Sequence[Sequence[float]]) -> float:
+  """上下边长度比 top/bot：<1 = 上窄下宽（俯视），>1 = 上宽下窄（仰视）。
+
+  对应生成侧的 X 轴（俯仰）；≈1 表示该方向没有梯形变形。
+
+  Args:
+      quad: 四边形 `(4, 2)`。
+
+  Returns:
+      比值（>0）。
+  """
+  p = np.asarray(quad, dtype=float).reshape(4, 2)
+  top = float(np.linalg.norm(p[1] - p[0]))
+  bot = float(np.linalg.norm(p[2] - p[3]))
+  return float(top / max(bot, 1e-6))
+
+
 # ---------------------------------------------------------------- 统计类
 
 class Analysis:
@@ -155,6 +210,9 @@ class Analysis:
     self.aspects: list[float] = []
     self.board_areas: list[float] = []
     self.board_ratios: list[float] = []  # 板面面积 / 数字面积
+    self.persps: list[float] = []        # 板面透视强度（看 POSE_DISTANCE 效果）
+    self.rolls: list[float] = []         # 板面面内旋转角（度，Z 轴）
+    self.keystones: list[float] = []     # 板面上/下边长度比（X 轴俯仰）
     self.centers_x: list[float] = []
     self.centers_y: list[float] = []     # 归一化坐标（0~1）
     self.depths: list[float] = []
@@ -186,6 +244,9 @@ class Analysis:
         if board:
           b_area = quad_area(board)
           self.board_areas.append(b_area)
+          self.persps.append(quad_persp(board))
+          self.rolls.append(quad_roll(board))
+          self.keystones.append(quad_keystone(board))
           if area > 1e-6:
             self.board_ratios.append(b_area / area)
 
@@ -261,6 +322,10 @@ class Analysis:
         "quad_aspect": _pct(self.aspects),
         "board_area": _pct(self.board_areas),
         "board_digit_ratio": _pct(self.board_ratios),
+        # 板面姿态（生成侧 POSE_* 的效果）：透视强度 / 面内旋转 / 梯形度
+        "board_persp": _pct(self.persps),
+        "board_roll": _pct(self.rolls),
+        "board_keystone": _pct(self.keystones),
         "depth": _pct(self.depths),
         "sigma": _pct(self.sigmas),
         "top_sources": top_sources,
@@ -375,6 +440,43 @@ class Analysis:
     ax.set_ylabel("数量")
     ax.legend(fontsize=8)
 
+  def plot_persp(self, ax: plt.Axes) -> None:
+    """板面透视强度分布（越小越接近长焦/正交；看 POSE_DISTANCE 的效果）"""
+    if not self.persps:
+      ax.set_visible(False)
+      return
+    ax.hist(self.persps, bins=40, color="#4C78A8", edgecolor="white")
+    med = float(np.median(self.persps))
+    ax.axvline(med, color="black", ls="--", lw=1, label=f"median={med:.3f}")
+    ax.set_title("板面透视强度 (对边不等长程度)")
+    ax.set_xlabel("persp")
+    ax.set_ylabel("数量")
+    ax.legend(fontsize=8)
+
+  def plot_roll(self, ax: plt.Axes) -> None:
+    """板面面内旋转角分布（对应生成侧的 Z 轴滚转）"""
+    if not self.rolls:
+      ax.set_visible(False)
+      return
+    ax.hist(self.rolls, bins=40, color="#F58518", edgecolor="white")
+    ax.axvline(0.0, color="black", ls=":", lw=1, label="0°")
+    ax.set_title("板面面内旋转角 (Z 轴)")
+    ax.set_xlabel("roll (deg)")
+    ax.set_ylabel("数量")
+    ax.legend(fontsize=8)
+
+  def plot_keystone(self, ax: plt.Axes) -> None:
+    """板面上/下边长度比分布（对应生成侧的 X 轴俯仰）"""
+    if not self.keystones:
+      ax.set_visible(False)
+      return
+    ax.hist(self.keystones, bins=40, color="#54A24B", edgecolor="white")
+    ax.axvline(1.0, color="black", ls=":", lw=1, label="no keystone")
+    ax.set_title("板面上/下边长度比 (X 轴俯仰)")
+    ax.set_xlabel("top / bottom")
+    ax.set_ylabel("数量")
+    ax.legend(fontsize=8)
+
   def plot_centers(self, ax: plt.Axes) -> None:
     """数字中心位置热力图（归一化坐标）"""
     if not self.centers_x:
@@ -411,9 +513,9 @@ class Analysis:
   # ------------------------------------------------------------ 组合图
 
   def plot_overview(self) -> plt.Figure:
-    """12 面板总览图，返回 matplotlib Figure"""
+    """15 面板总览图，返回 matplotlib Figure"""
     _setup_cjk_font()
-    fig, axes = plt.subplots(3, 4, figsize=(20, 12))
+    fig, axes = plt.subplots(3, 5, figsize=(25, 12))
     fig.suptitle(
         f"数据集统计总览 — {self.dataset_dir.name} "
         f"(samples={self.n_samples}, digits={self.n_digits})",
@@ -423,18 +525,21 @@ class Analysis:
     self.plot_digits_per_sample(axes[0, 1])
     self.plot_sources(axes[0, 2])
     self.plot_quad_area(axes[0, 3])
+    self.plot_area_ratio(axes[0, 4])
 
-    self.plot_area_ratio(axes[1, 0])
-    self.plot_width_height(axes[1, 1])
-    self.plot_aspect(axes[1, 2])
-    self.plot_board_area(axes[1, 3])
+    self.plot_width_height(axes[1, 0])
+    self.plot_aspect(axes[1, 1])
+    self.plot_board_area(axes[1, 2])
+    self.plot_persp(axes[1, 3])
+    self.plot_roll(axes[1, 4])
 
     self.plot_centers(axes[2, 0])
     self.plot_depth(axes[2, 1])
     self.plot_sigma(axes[2, 2])
+    self.plot_keystone(axes[2, 3])
 
-    # 第 12 格：每个源图的「样本数 × 数字数」，直观看出复用程度
-    ax = axes[2, 3]
+    # 最后一格：每个源图的「样本数 × 数字数」，直观看出复用程度
+    ax = axes[2, 4]
     src_stats = self.source_stats()
     if src_stats:
       xs = [v["samples"] for v in src_stats.values()]

@@ -17,9 +17,10 @@ from src.utils.debug_tools import cv_show, hstack_images
 from src.utils.feature_extration import (fuse_scene, get_flat_quad, inset_quad,
                                         segment_quad)
 from src.utils.font_processor import font2img, get_font_path
-from src.utils.geometry import proj_tran, quad2M
+from src.utils.geometry import QuadSegment, proj_tran, quad2M
 from src.utils.logging_tools import get_logger
 from src.utils.typing_tools import is_number, random_choose
+from src.preprocess.perspective import resample_pose
 
 # 本次运行的标识（用作产物目录名）
 _UUID = LogConfig.UUID
@@ -190,7 +191,15 @@ class Preprocess:
                board_gray: tuple[int, int] | None = ppcfg.BOARD_GRAY,
                board_gray_flip: tuple[int, int] = ppcfg.BOARD_GRAY_FLIP,
                polarity_flip_rate: float = ppcfg.POLARITY_FLIP_RATE,
-               min_visible_contrast: float = ppcfg.MIN_VISIBLE_CONTRAST
+               min_visible_contrast: float = ppcfg.MIN_VISIBLE_CONTRAST,
+               pose_resample: bool = ppcfg.POSE_RESAMPLE,
+               pose_distance: tuple[float, float] = ppcfg.POSE_DISTANCE,
+               pose_rot_x: tuple[float, float] = ppcfg.POSE_ROT_X,
+               pose_rot_y: tuple[float, float] = ppcfg.POSE_ROT_Y,
+               pose_rot_z: tuple[float, float] = ppcfg.POSE_ROT_Z,
+               pose_area_jitter: tuple[float, float] = ppcfg.POSE_AREA_JITTER,
+               pose_area_mode: str = ppcfg.POSE_AREA_MODE,
+               pose_blend: float = ppcfg.POSE_BLEND
                ) -> None:
     self.config = {
         "distortion": distortion,
@@ -225,6 +234,15 @@ class Preprocess:
     self.board_gray_flip = board_gray_flip
     self.polarity_flip_rate = float(polarity_flip_rate)
     self.min_visible_contrast = float(min_visible_contrast)
+    # 板面姿态（透视强弱 + 三轴旋转）：只影响板面四边形形状
+    self.pose_resample = bool(pose_resample)
+    self.pose_distance = pose_distance
+    self.pose_rot_x = pose_rot_x
+    self.pose_rot_y = pose_rot_y
+    self.pose_rot_z = pose_rot_z
+    self.pose_area_jitter = pose_area_jitter
+    self.pose_area_mode = str(pose_area_mode).lower()
+    self.pose_blend = float(pose_blend)
     # 数字留边：横/纵分别可以是固定值或区间；每张图各抽一档，同一张图内保持一致
     self.margin_range = _parse_margin_range(board_margin)
     self.board_margin = board_margin
@@ -397,6 +415,21 @@ class Preprocess:
                       k_lo, k_hi, len(segments))
         return None, []
       segments = random_choose(segments, min(target_count, len(segments)))
+
+    # 板面姿态重采样：把「环境图里检测到的平坦区域形状」换成
+    # 「等效相机距离 + 三轴倾角」下的矩形透视投影（中心/面积基本不变）。
+    # 只改板面四边形的形状，数字四边形仍由 inset_quad 从它派生，标签格式不变。
+    if self.pose_resample and segments:
+      h_img, w_img = gray.shape[:2]
+      segments = [QuadSegment(resample_pose(
+          seg.quad,
+          distance=self.pose_distance,
+          rot_x=self.pose_rot_x, rot_y=self.pose_rot_y,
+          rot_z=self.pose_rot_z,
+          area_jitter=self.pose_area_jitter,
+          area_mode=self.pose_area_mode,
+          blend=self.pose_blend,
+          bounds=(w_img, h_img))) for seg in segments]
 
     # 数字也从贴图池里随机取（类别由 digit_ids 给出）
     boxed_text_count = len(segments)

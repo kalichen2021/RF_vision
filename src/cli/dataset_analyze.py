@@ -77,6 +77,11 @@ def print_summary(stats: dict, console: Console) -> None:
   _pct_row("数字四边形面积(pixel^2)", "quad_area", ".0f")
   _pct_row("数字宽度/高度(pixel)", "quad_width", ".1f")
   _pct_row("板面/数字面积比", "board_digit_ratio", ".2f")
+  # 板面姿态（生成侧 POSE_DISTANCE / POSE_ROT_* 的效果）
+  _pct_row("板面透视强度", "board_persp", ".3f")
+  _pct_row("板面面内旋转角(deg)", "board_roll", ".1f",
+           keys=("p5", "p50", "p95"))
+  _pct_row("板面上/下边长度比", "board_keystone", ".2f")
   _pct_row("depth", "depth", ".3f")
   _pct_row("sigma", "sigma", ".2f")
 
