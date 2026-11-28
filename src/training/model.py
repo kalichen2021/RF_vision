@@ -262,4 +262,5 @@ def total_loss(
   L_reg = F.smooth_l1_loss(reg_p_m, reg_t_m) if reg_p_m.numel() else reg_p.sum() * 0
   L_cls = F.cross_entropy(cls_p_m, cls_t_m) if cls_p_m.numel() else cls_p.sum() * 0
   total_loss = l_hm * L_hm + l_reg * L_reg + l_cls * L_cls
-  return total_loss, (L_hm.item(), L_reg.item(), L_cls.item())
+  # 不在这里 .item()：保持为 tensor，避免每个 batch 四次 CUDA 同步
+  return total_loss, (L_hm, L_reg, L_cls)

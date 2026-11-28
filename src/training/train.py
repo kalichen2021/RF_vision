@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from src.utils.file_operation import save_json
 from src.utils.logging_tools import get_logger
 
+from configs.training_cfg import TrainingConfig
 from .dataset import batch_to_torch
 from .model import CenterNetDigit, build_target, total_loss
 
@@ -179,7 +180,7 @@ class Trainer:
       imgs = imgs.to(self.device, non_blocking=True)
       hm_t, reg_t, cls_t, mask = build_target(
           quads_list, digits_list, imgs.shape[2] // stride,
-          imgs.shape[3] // stride)
+          imgs.shape[3] // stride, radius=TrainingConfig.HM_RADIUS)
       hm_t, reg_t, cls_t, mask = (
           hm_t.to(self.device, non_blocking=True),
           reg_t.to(self.device, non_blocking=True),
@@ -189,20 +190,23 @@ class Trainer:
       with torch.amp.autocast(device_type, enabled=amp_enabled):
         hm_p, reg_p, cls_p = model(imgs)
         loss, parts = total_loss(hm_p, reg_p, cls_p, hm_t, reg_t, cls_t, mask)
-      for i, v in enumerate((loss.item(), *parts)):
-        agg[i] += v
-        pos = mask.bool()                      # (B, 48, 48) 的 True/False，True = 真实中心格
-        if pos.any():                          # 万一这批发图里一个数字都没有，就跳过
-          peak_sum += float(hm_p.squeeze(1)[pos].float().sum())
-          peak_n += float(pos.sum())
+      # 用 tensor 累加，不调 .item()：避免每个 batch 多次 CUDA 同步
+      agg[0] += loss.detach()
+      for i, p in enumerate(parts, start=1):
+        agg[i] += p.detach()
+      # GT 中心格的平均预测值：也留在 GPU 上累加（整批无数字时自然为 0）
+      pos = mask.bool()
+      peak_sum += hm_p.squeeze(1)[pos].float().sum()
+      peak_n += pos.sum()
 
     if was_training:
       # 验证完必须切回训练态，否则 dropout 会被一直关掉；冻结块的 BN 也要复原
       model.train()
       self._set_frozen_bn_eval(model)
     n = max(len(dataloader), 1)
-    hm_peak = peak_sum / peak_n if peak_n else float("nan")
-    return agg[0] / n, agg[1] / n, agg[2] / n, agg[3] / n, hm_peak
+    means = [float(v) / n for v in agg]              # 只在这里同步一次
+    hm_peak = float(peak_sum) / float(peak_n) if peak_n else float("nan")
+    return means[0], means[1], means[2], means[3], hm_peak
 
   def train(self,
             model: CenterNetDigit,
@@ -293,7 +297,7 @@ class Trainer:
         imgs = imgs.to(self.device, non_blocking=True)
         hm_t, reg_t, cls_t, mask = build_target(
             quads_list, digits_list, imgs.shape[2] // stride,
-            imgs.shape[3] // stride)
+            imgs.shape[3] // stride, radius=TrainingConfig.HM_RADIUS)
         hm_t, reg_t, cls_t, mask = (
             hm_t.to(self.device, non_blocking=True),
             reg_t.to(self.device, non_blocking=True),
@@ -309,12 +313,12 @@ class Trainer:
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        for i, v in enumerate((loss.item(), *parts)):
+        for i, v in enumerate((loss.detach(), *(p.detach() for p in parts))):
           agg[i] += v
         last = time.perf_counter()
 
       n = max(len(dataloader), 1)
-      loss_avg, hm_avg, reg_avg, cls_avg = (v / n for v in agg)
+      loss_avg, hm_avg, reg_avg, cls_avg = (float(v) / n for v in agg)
 
       # 每 val_interval 轮（以及最后一轮）跑一次验证：
       # 早停 / best 权重 / 降 lr **只**看验证 loss（没有验证集就全部跳过）

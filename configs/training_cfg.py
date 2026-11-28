@@ -20,7 +20,9 @@ class TrainingConfig:
 
   EPOCHS_HEAD: int = 15        # 阶段一：冻结 backbone，只训 head
   EPOCHS_FINETUNE: int = 25    # 阶段二：解冻 backbone，整体微调
-  BATCH_SIZE: int = 48
+  # 8G 显存跑 384 输入：batch 32 约占 1.2GB，64 约占 2.2GB，完全放得下。
+  # batch 越大，每个 step 的 Python / 同步开销摊得越薄，GPU 利用率越高。
+  BATCH_SIZE: int = 64
 
   # --------数据管线（GPU 利用率低通常是这里没配好）--------
   # DataLoader 子进程数：0 = 主进程里读图（GPU 会等 CPU，利用率自然低）
@@ -76,3 +78,12 @@ class TrainingConfig:
   #   8 = 384 输入 -> 48x48 特征图（旧行为）
   # 只影响 build_target 的格子数；解码端是尺寸无关的，不用改。
   FEAT_STRIDE: int = 4
+
+  # 高斯标签半径（**格数**，不是像素）。像素宽度 = HM_RADIUS * FEAT_STRIDE，
+  # 维持在 4~8px 就够，目的是给「中心格量化误差」留一点容忍：
+  #   stride 4（96x96 特征图）-> 1（约 4px）← 默认
+  #   stride 8（48x48 特征图）-> 2（旧行为，约 16px）
+  # 取太大：软标签那圈值会把笔画本身「摊平」，max 值上不去
+  # （stride 4 还用 2 时 GT 峰值只有 0.72~0.78，heatmap loss 也翻倍）；
+  # 取太小：量化误差完全压在 reg 头上，中心定位会抖。
+  HM_RADIUS: int = 1
