@@ -28,6 +28,7 @@ import numpy as np
 import torch
 
 from configs.realtime_cfg import RealtimeConfig
+from configs.training_cfg import TrainingConfig
 from src.utils.debug_tools import draw_quads, save_image, tensor2img
 from src.utils.image import center_origin, crop_square, to_tensor
 from src.utils.logging_tools import get_logger
@@ -74,7 +75,7 @@ class CameraDetector:
   """
 
   def __init__(self, inferrer: Any, index: int = 0,
-               img_size: tuple[int, int] = (384, 384),
+               img_size: tuple[int, int] | None = None,
                width: int | None = 1280, height: int | None = 720,
                thr: float = 0.3, topk: int = 30, show: bool = True,
                window_name: str = "digits_tracker",
@@ -87,7 +88,9 @@ class CameraDetector:
                show_heatmap: bool | None = None,
                capture: Any = None) -> None:
     self.inferrer = inferrer
-    self.img_size = tuple(img_size)
+    # 送进网络的尺寸：None 时读配置（与训练 / 推理共用同一个值）
+    self.img_size = tuple(TrainingConfig.IMG_SIZE if img_size is None
+                          else img_size)
     self.thr = float(thr)
     self.topk = int(topk)
     self.show = bool(show)

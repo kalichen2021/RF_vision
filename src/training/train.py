@@ -172,11 +172,14 @@ class Trainer:
     amp_enabled = bool(self.use_amp and device_type == "cuda")
     agg = [.0, .0, .0, .0]  # loss, heatmap, offset, cls
     peak_sum, peak_n = 0.0, 0.0     # GT 中心格预测值的「总和」与「个数」
+    # 目标格数由模型自报的 feat_stride 决定（4 -> 96x96，8 -> 48x48）
+    stride = int(getattr(model, "feat_stride", 8))
     for batch in dataloader:
       imgs, quads_list, digits_list = batch_to_torch(batch)
       imgs = imgs.to(self.device, non_blocking=True)
       hm_t, reg_t, cls_t, mask = build_target(
-          quads_list, digits_list, imgs.shape[2] // 8, imgs.shape[3] // 8)
+          quads_list, digits_list, imgs.shape[2] // stride,
+          imgs.shape[3] // stride)
       hm_t, reg_t, cls_t, mask = (
           hm_t.to(self.device, non_blocking=True),
           reg_t.to(self.device, non_blocking=True),
@@ -269,6 +272,8 @@ class Trainer:
       _logger.warning("未提供验证集：本轮训练不会选择 best / 不会早停 / 不降 lr")
     metric_name = "val loss"
     best_metric = float("inf")
+    # 目标格数由模型自报的 feat_stride 决定（与 head 的输出尺寸一致）
+    stride = int(getattr(model, "feat_stride", 8))
     best_state = {k: v.detach().cpu().clone()
                   for k, v in model.state_dict().items()}
     bad_epochs = 0
@@ -287,7 +292,8 @@ class Trainer:
         imgs, quads_list, digits_list = batch_to_torch(batch)
         imgs = imgs.to(self.device, non_blocking=True)
         hm_t, reg_t, cls_t, mask = build_target(
-            quads_list, digits_list, imgs.shape[2] // 8, imgs.shape[3] // 8)
+            quads_list, digits_list, imgs.shape[2] // stride,
+            imgs.shape[3] // stride)
         hm_t, reg_t, cls_t, mask = (
             hm_t.to(self.device, non_blocking=True),
             reg_t.to(self.device, non_blocking=True),
@@ -386,6 +392,7 @@ class Trainer:
         "state_dict": model.state_dict(),
         "num_classes": getattr(model, "num_classes", None),
         "dropout": getattr(model, "dropout_p", None),
+        "feat_stride": getattr(model, "feat_stride", None),
     }, self.ckpt_path)
     _logger.info("权重已保存: %s  (best %s %.4f)",
                  self.ckpt_path, metric_name,

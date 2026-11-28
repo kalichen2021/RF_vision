@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 import numpy as np
 
+from configs.training_cfg import TrainingConfig
 from src.utils.image import IMAGENET_MEAN, IMAGENET_STD, read_gray, resize
 
 # ImageNet 归一化参数（与 src.utils.image 共用一份，避免各处重复定义）
@@ -66,7 +67,7 @@ class DigitDataset:
 
   def __init__(self, json_path: Path | str, img_dir: Path | str,
                trainingset_ratio: float = 1.0,
-               img_size: tuple[int, int] = (384, 384),
+               img_size: tuple[int, int] | None = None,
                convert: str = "RGB", mode: DatasetMode = "training",
                crop_square: CropSquare = "auto") -> None:
     """_summary_
@@ -75,7 +76,8 @@ class DigitDataset:
         json_path (Path):  json 路径
         img_dir (Path): 图片文件夹路径
         trainingset_ratio (float, optional): 取前百分之多少的样本作为训练集 (0~1]. Defaults to 1.0.
-        img_size (tuple, optional): 图片输入尺寸 (H, W). Defaults to (384, 384).
+        img_size (tuple, optional): 图片输入尺寸 (H, W)。
+            **None 时读 `configs.training_cfg.IMG_SIZE`**（唯一真源，全局切 384/640）。
         convert (str, optional): "RGB"（3 通道，ResNet18 输入）或 "L"（灰度单通道）. Defaults to "RGB".
         mode (str, optional): 数据集模式，可以是 "training" 或 "testing". Defaults to "training".
         crop_square (bool | "auto", optional): 样本不是正方形时的处置：
@@ -84,6 +86,8 @@ class DigitDataset:
     """
     with open(json_path, 'r') as f:
       self.data = json.load(f)
+    # 输入尺寸统一从配置读，避免训练/推理各写死一个值导致尺度不一致
+    img_size = tuple(TrainingConfig.IMG_SIZE if img_size is None else img_size)
     self.img_dir = Path(img_dir)
     ratio = float(trainingset_ratio)
     if not 0 < ratio <= 1:

@@ -5,6 +5,8 @@ import torchvision
 import os
 from collections.abc import Sequence
 
+from configs.training_cfg import TrainingConfig
+
 os.environ["TORCH_HOME"] = 'D:/Dev-Lab/.TORCH_HOME'
 # 这里不要定义模块级 device：model.py 会被 DataLoader worker 通过 spawn import，
 # worker 里一旦初始化 CUDA，每个进程都会建一份 context（几百 MB），
@@ -23,7 +25,8 @@ os.environ["TORCH_HOME"] = 'D:/Dev-Lab/.TORCH_HOME'
 class CenterNetDigit(nn.Module):
   """CenterNet-style digit heatmap, offset, and classification model."""
 
-  def __init__(self, num_classes: int = 10, dropout: float = 0.0) -> None:
+  def __init__(self, num_classes: int = 10, dropout: float = 0.0,
+               feat_stride: int | None = None) -> None:
     """Initialize the backbone and prediction heads.
 
     Args:
@@ -33,11 +36,20 @@ class CenterNetDigit(nn.Module):
             全卷积网络没有 FC 层，所以用逐通道空间 dropout；
             只在 >0 时插入模块，因此 0 时结构与旧权重完全一致。
             训练时用 `configs.training_cfg.DROPOUT`，推理 / 评估必须用同一个值。
+        feat_stride (int | None): head 工作的下采样倍数：4（默认）/ 8。
+            4 时会在 backbone 后面插一个一倍上采样，把 384 输入的特征图
+            从 48x48 提到 96x96，定位更细（head 算力约 x4）；
+            8 时保持旧行为（48x48）。None 时读 `TrainingConfig.FEAT_STRIDE`。
     """
     super().__init__()
     dropout = float(dropout)
     if not 0.0 <= dropout < 1.0:
       raise ValueError(f"dropout 应为 [0, 1) 内的概率，收到 {dropout}")
+    feat_stride = int(TrainingConfig.FEAT_STRIDE if feat_stride is None
+                      else feat_stride)
+    if feat_stride not in (4, 8):
+      raise ValueError(f"feat_stride 只支持 4 或 8，收到 {feat_stride}")
+    self.feat_stride = feat_stride
     r18 = torchvision.models.resnet18(weights="IMAGENET1K_V1")
     self.backbone = nn.Sequential(
         r18.conv1,  # (B, 192, 192, 64)
@@ -47,6 +59,18 @@ class CenterNetDigit(nn.Module):
         r18.layer1,  # (B, 48, 48, 64)
         r18.layer2,  # (B, 24, 24, 128)
     )
+    # stride 8 -> 4：layer2 输出再上采样一倍（384 输入时 48x48 -> 96x96）。
+    # 用 3x3 卷积先融合一下再上采样，比直接插值更平滑。
+    # feat_stride=8 时不插任何层（Identity），这样**旧权重的键名不变、仍可加载**。
+    if feat_stride == 4:
+      self.neck: nn.Module = nn.Sequential(
+          nn.Conv2d(128, 128, 3, padding=1),
+          nn.BatchNorm2d(128),
+          nn.LeakyReLU(0.1, inplace=True),
+          nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+      )
+    else:
+      self.neck = nn.Identity()
     
     def _head(out_ch: int, *, sigmoid: bool = False) -> nn.Sequential:
       """Conv3x3 -> ReLU -> [Dropout2d] -> Conv1x1 [-> Sigmoid]"""
@@ -91,7 +115,7 @@ class CenterNetDigit(nn.Module):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Heatmap,
         offset, and classification tensors.
     """
-    x = self.backbone(x)
+    x = self.neck(self.backbone(x))
     return self.hm_head(x), self.reg_head(x), self.cls_head(x)
 
 

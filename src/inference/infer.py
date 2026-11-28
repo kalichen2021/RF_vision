@@ -28,6 +28,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from configs.training_cfg import TrainingConfig
 from src.training.model import CenterNetDigit
 from src.utils.image import IMAGENET_MEAN, IMAGENET_STD, load_tensor
 from src.utils.logging_tools import get_logger
@@ -38,15 +39,17 @@ _STD = list(IMAGENET_STD)
 _logger = get_logger(__name__)
 
 
-def build_transform(img_size: tuple[int, int] = (384, 384)) -> T.Compose:
+def build_transform(img_size: tuple[int, int] | None = None) -> T.Compose:
   """训练时用的预处理（灰度 PNG 也要补成三通道，r18 只吃 3 通道）
 
   Args:
-      img_size (tuple[int, int]): 目标输入尺寸
+      img_size (tuple[int, int] | None): 目标输入尺寸 `(高, 宽)`；
+          None 时读 `configs.training_cfg.IMG_SIZE`
 
   Returns:
       torchvision.transforms.Compose: 可直接作用于 PIL 图像
   """
+  img_size = tuple(TrainingConfig.IMG_SIZE if img_size is None else img_size)
   return T.Compose([
       T.Resize(tuple(img_size)),
       T.ToTensor(),
@@ -54,12 +57,13 @@ def build_transform(img_size: tuple[int, int] = (384, 384)) -> T.Compose:
   ])
 
 
-def load_image(path: str | Path, img_size: tuple[int, int] = (384, 384)) -> torch.Tensor:
+def load_image(path: str | Path,
+               img_size: tuple[int, int] | None = None) -> torch.Tensor:
   """读一张图并转成 `(1, 3, H, W)` 张量（还没搬到 device）。
 
   Args:
       path: 图片路径。
-      img_size: 目标输入尺寸 `(高, 宽)`。
+      img_size: 目标输入尺寸 `(高, 宽)`；None 时读 `TrainingConfig.IMG_SIZE`。
 
   Returns:
       `(1, 3, H, W)` float32 张量。
@@ -102,9 +106,11 @@ class Inferer:
 
   def __init__(self, model: CenterNetDigit, ckpt_path: str | Path,
                device: str = "cpu", num_classes: int = 10,
-               img_size: tuple[int, int] = (384, 384)) -> None:
+               img_size: tuple[int, int] | None = None) -> None:
     self.device = torch.device(device)
-    self.img_size = tuple(img_size)
+    # 输入尺寸：None 时读配置（与训练 / 摄像头共用同一个值）
+    self.img_size = tuple(TrainingConfig.IMG_SIZE if img_size is None
+                          else img_size)
     self.model = self._load(model,Path(ckpt_path), num_classes)
     self.model.to(self.device).eval()
     self.tf = build_transform(self.img_size)
@@ -138,6 +144,23 @@ class Inferer:
     # 用 checkpoint 自带的结构信息校验 / 对齐 dropout
     ckpt_dropout = meta.get("dropout")
     model_dropout = getattr(model, "dropout_p", None)
+    ckpt_stride = meta.get("feat_stride")
+    model_stride = getattr(model, "feat_stride", None)
+    if (ckpt_stride is not None and model_stride is not None
+            and int(ckpt_stride) != int(model_stride)):
+      raise ValueError(
+          f"权重是按 feat_stride={ckpt_stride} 训练的，但当前模型是 "
+          f"feat_stride={model_stride}；请用 CenterNetDigit("
+          f"feat_stride={ckpt_stride}) 构造，或重新训练")
+    # 结构代差：带 neck（stride 4）的新模型无法加载 stride 8 的旧权重
+    ckpt_keys = set(state.keys())
+    model_keys = set(model.state_dict().keys())
+    if (any(k.startswith("neck.") for k in model_keys)
+            and not any(k.startswith("neck.") for k in ckpt_keys)):
+      raise ValueError(
+          "这份权重是 stride 8 的旧结构（没有 neck），而当前模型是 stride 4。\n"
+          "  想继续用它：CenterNetDigit(..., feat_stride=8)\n"
+          "  想用新结构：重新训练一次即可（旧权重不兼容）")
     if ckpt_dropout is not None and model_dropout is not None \
             and float(ckpt_dropout) != float(model_dropout):
       if float(ckpt_dropout) == 0.0 and _strip_head_dropout(model):

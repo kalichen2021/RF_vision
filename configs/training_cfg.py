@@ -64,5 +64,15 @@ class TrainingConfig:
   LR_PLATEAU_PATIENCE: int = 2
   LR_MIN: float = 1e-6              # 降 lr 的下限
 
-  # 输入尺寸 (高, 宽)：训练、推理、摄像头必须一致
-  IMG_SIZE: tuple[int, int] = (640, 640)
+  # 输入尺寸 (高, 宽)：**唯一真源**。
+  # 训练（DigitDataset）/ 推理（Inferer）/ 摄像头（CameraDetector）/ 评估全部读这里，
+  # 改这一处就整体切换；不要在各模块里写死 384 或 640。
+  # 384 推荐（算力与内存友好）；试 640 时把这里改成 (640, 640)，
+  # 并把 BATCH_SIZE / NUM_WORKERS 按注释推荐值调低即可。
+  IMG_SIZE: tuple[int, int] = (384, 384)
+
+  # 特征图下采样倍数（head 工作在 stride 上）：
+  #   4 = 384 输入 -> 96x96 特征图（定位更细，head 算力约 x4）← 默认
+  #   8 = 384 输入 -> 48x48 特征图（旧行为）
+  # 只影响 build_target 的格子数；解码端是尺寸无关的，不用改。
+  FEAT_STRIDE: int = 4

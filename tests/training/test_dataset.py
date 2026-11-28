@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from configs.path import PathConfig
+from configs.training_cfg import TrainingConfig
 from src.training.dataset import DigitDataset, batch_to_torch, collate_fn
 from src.training.model import CenterNetDigit, build_target, total_loss
 
@@ -43,7 +44,7 @@ def test_single(ds: DigitDataset) -> None:
 def test_sanity_check(batch: tuple) -> None:
   """标签生成：中心格峰值为 1，且没有数字因为量化到同一格被覆盖。"""
   imgs, quads_list, digits_list = batch
-  fh = fw = imgs.shape[2] // 8
+  fh = fw = imgs.shape[2] // TrainingConfig.FEAT_STRIDE
   hm_t, _reg_t, _cls_t, mask = build_target(quads_list, digits_list, fh, fw)
 
   n_tgt = torch.tensor([q.shape[0] for q in quads_list])
@@ -60,7 +61,7 @@ def test_sanity_check(batch: tuple) -> None:
 def test_loss(batch: tuple) -> None:
   """loss 能前向 + 反传，且反传不改参数、梯度确实流到 backbone。"""
   imgs, quads_list, digits_list = batch
-  fh = fw = imgs.shape[2] // 8
+  fh = fw = imgs.shape[2] // TrainingConfig.FEAT_STRIDE
   hm_t, reg_t, cls_t, mask = build_target(quads_list, digits_list, fh, fw)
 
   model = CenterNetDigit(num_classes=10)

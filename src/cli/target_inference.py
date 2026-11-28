@@ -60,7 +60,8 @@ dl = DataLoader(ds, batch_size=4, collate_fn=collate_fn)
 
 
 def load_image_tensor(path: Path | str,
-                     img_size: tuple[int, int] = (384, 384)) -> torch.Tensor:
+                     img_size: tuple[int, int] | None = None
+                     ) -> torch.Tensor:
   """读任意图片文件 → 与 `DigitDataset` 完全一致的 `(1, 3, H, W)` 张量。
 
   先转灰度再复制成 3 通道（训练集样本就是灰度 PNG），归一化参数与
@@ -68,7 +69,7 @@ def load_image_tensor(path: Path | str,
 
   Args:
       path: 图片路径（支持中文路径）。
-      img_size: 送进网络的 `(高, 宽)`，必须与训练一致。
+      img_size: 送进网络的 `(高, 宽)`；None 时读 `TrainingConfig.IMG_SIZE`。
 
   Returns:
       `(1, 3, H, W)` float32 张量。
@@ -76,6 +77,7 @@ def load_image_tensor(path: Path | str,
   Raises:
       ValueError: 图片读不出来。
   """
+  img_size = tuple(TrainingConfig.IMG_SIZE if img_size is None else img_size)
   return load_tensor(path, img_size, mode="gray", interp="linear",
                      crop="center" if InferConfig.CROP_SQUARE else "none")
 
